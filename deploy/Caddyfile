@@ -1,0 +1,29 @@
+remedy-pdf-desktop.example.com {
+    encode zstd gzip
+
+    # Reverse proxy to the app
+    reverse_proxy localhost:8000
+
+    # Security headers
+    header {
+        # Prevent clickjacking
+        X-Frame-Options "DENY"
+        # Prevent MIME sniffing
+        X-Content-Type-Options "nosniff"
+        # XSS protection
+        X-XSS-Protection "1; mode=block"
+        # Referrer policy
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Content Security Policy
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' wss://remedy-pdf-desktop.example.com; img-src 'self' data:;"
+        # Strict Transport Security (HTTPS only)
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Remove server header
+        -Server
+    }
+
+    # File upload size limit (50MB)
+    request_body {
+        max_size 50MB
+    }
+}

@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Python dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run pytest
+        # Full suite including slow integration tests (job_lifecycle, upload,
+        # content_stream_integrity). Per-test timeout is configured in
+        # pyproject.toml so a single hang cannot wedge the job.
+        run: pytest tests/ -v --durations=10
+        env:
+          OPENROUTER_API_KEY: "test-key"
+
+      - name: Install frontend dependencies
+        run: cd web && npm ci
+
+      - name: Frontend lint
+        run: cd web && npm run lint
+
+      - name: Frontend typecheck & build
+        run: cd web && npm run build
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Python dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Python dependency audit
+        # CVE-2026-3219 currently affects pip itself and has no fixed
+        # version published in the advisory database. Keep auditing project
+        # dependencies while ignoring only that runtime-tool advisory.
+        run: pip-audit --skip-editable --ignore-vuln CVE-2026-3219
+
+      - name: Install frontend dependencies
+        run: cd web && npm ci
+
+      - name: NPM audit
+        run: cd web && npm audit --omit=dev || true

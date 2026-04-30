@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Commit-message hook: warn (non-blocking) when the Co-Authored-By trailer is
+# missing. Opt-in — enable with:
+#     git config core.hooksPath .githooks
+set -eu
+
+msg_file="$1"
+if grep -qE '^Co-Authored-By: ' "$msg_file"; then
+  exit 0
+fi
+
+# Skip for merge / fixup / squash commits — they inherit parent provenance.
+first_line="$(head -n1 "$msg_file")"
+case "$first_line" in
+  "Merge "*|"fixup! "*|"squash! "*|"Revert "*)
+    exit 0
+    ;;
+esac
+
+cat >&2 <<'WARN'
+[commit-msg] Note: Co-Authored-By trailer not found.
+            If this commit was co-authored (e.g. with Claude Code), add a
+            trailing line like:
+              Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+            Not blocking the commit.
+WARN
+exit 0

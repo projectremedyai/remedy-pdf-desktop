@@ -1,0 +1,1 @@
+Put the Windows Ollama standalone CLI binary here as `ollama.exe`.

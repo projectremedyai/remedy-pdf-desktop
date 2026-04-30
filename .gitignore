@@ -1,0 +1,85 @@
+# Environment & credentials
+.env
+.env.*
+!.env.example
+firebase-service-account.json
+firebase-service-account*.json
+service-account*.json
+credentials*.json
+client_secret*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+.npmrc
+.yarnrc
+web/.env
+web/.env.*
+!web/.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Data (uploads, output, test files)
+/data/
+
+# Node
+node_modules/
+web/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+default.profraw
+
+# Build artifacts
+dist/
+build/
+*.spec~
+# Stray Vite code-split chunks if they land at repo root (should live under web/dist/)
+/product-name-*.js
+/*-*.js
+
+# Local debug notes — keep locally, don't track
+APP_DEBUG_NOTES_*.md
+*johnnyrobot*Mac Studio*
+
+# Duplicate agent-instruction files (content lives in CLAUDE.md)
+/AGENTS.md
+/GEMINI.md
+
+# Agent/tool local state
+/entities.json
+/mempalace.yaml
+/openmemory.md
+/.claude/
+/.cursor/
+/.playwright-mcp/
+
+# Clean seed repo exclusions
+*.md
+docs/
+doc/
+knowledge-base/
+knowledge_base/
+*knowledge-base*/
+tests/
+test/
+__tests__/
+test_*.py
+*_test.py
+*.test.*
+*.spec.*
+!README.md
+
+# Screenshots / demo recordings — not part of source
+screenshots/
