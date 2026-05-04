@@ -6,10 +6,9 @@ import asyncio
 import hashlib
 import json
 import re
-import subprocess
 import time
 from collections import Counter
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -770,65 +769,11 @@ def _stable_manifest_document_id(pdf_path: Path, seen_ids: set[str]) -> str:
 
 async def _create_planner_client(config: Any) -> tuple[Any, bool]:
     """Create a generate_raw-capable planner client for benchmark modes."""
-    from project_remedy.gemini_client import GeminiClient
+    from project_remedy.ollama_client import OllamaClient
 
-    gemini_key = str(getattr(config.api, "gemini_api_key", "") or "").strip()
-    gemini_vertexai = bool(getattr(config.api, "gemini_vertexai", False))
-    gemini_project = str(getattr(config.api, "gemini_gcp_project", "") or "").strip()
-
-    if gemini_vertexai and not gemini_project:
-        gemini_project = _gcloud_default_project()
-        if gemini_project:
-            gemini_api = replace(
-                config.api,
-                gemini_gcp_project=gemini_project,
-            )
-            config = replace(config, api=gemini_api)
-
-    if getattr(config.api, "llm_backend", "") == "gemini":
-        if gemini_vertexai:
-            if not gemini_project:
-                raise RuntimeError("Vertex AI benchmark mode requires a GCP project")
-        elif not gemini_key:
-            raise RuntimeError("Gemini API key missing for benchmark planner mode")
-        client = GeminiClient(config)
-        await client.start()
-        return client, True
-
-    if getattr(config.api, "escalation_backend", "") == "gemini":
-        if gemini_vertexai:
-            if not gemini_project:
-                raise RuntimeError("Vertex AI benchmark mode requires a GCP project")
-        elif not gemini_key:
-            raise RuntimeError("Gemini API key missing for benchmark planner mode")
-        escalation_api = replace(
-            config.api,
-            llm_backend="gemini",
-            gemini_model=config.api.escalation_model,
-            gemini_batch_enabled=False,
-        )
-        gemini_config = replace(config, api=escalation_api)
-        client = GeminiClient(gemini_config)
-        await client.start()
-        return client, True
-
-    raise RuntimeError(
-        "Benchmark planner modes require a generate_raw-capable Gemini configuration",
-    )
-
-
-def _gcloud_default_project() -> str:
-    """Best-effort current gcloud project lookup for local benchmark runs."""
-    try:
-        result = subprocess.run(
-            ["gcloud", "config", "get-value", "project"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except Exception:
-        return ""
-    return result.stdout.strip()
+    client = OllamaClient(config)
+    await client.start()
+    return client, True
 
 
 def _build_error_record(
@@ -863,7 +808,7 @@ def _build_error_record(
 
 _GATED_MODES_MESSAGE = (
     "vision_planner and specialist_coordinator benchmark modes require a "
-    "real residual-failure corpus plus a Gemini / generate_raw-capable "
+    "real residual-failure corpus plus a generate_raw-capable "
     "planner client — see REMEDY-69 #13/#14/#15 for the sourcing work."
 )
 
@@ -1008,7 +953,7 @@ def main(argv: list[str] | None = None) -> int:
             "Run the PDF specialist coordinator benchmark against a frozen "
             "manifest. Baseline mode runs fully offline; vision_planner and "
             "specialist_coordinator modes are gated on an external residual "
-            "corpus and a Gemini planner client (REMEDY-69 #13/#14/#15)."
+            "corpus and a planner client (REMEDY-69 #13/#14/#15)."
         ),
     )
     parser.add_argument(

@@ -4,13 +4,12 @@ Renders PDF pages to images and sends them to a vision model for
 spatial analysis that can't be done with structure-tree inspection
 alone — reading order validation and color contrast estimation.
 
-Supports multiple providers: gemini, ollama, openai (any OpenAI-
-compatible API).  Provider selection is done at call time so users
-can mix and match.
+Supports Ollama and OpenAI-compatible providers. Provider selection is done
+at call time so users can mix and match.
 
 Usage::
 
-    analyzer = VisionAnalyzer(provider="gemini", api_key="...", model="gemini-2.5-flash")
+    analyzer = VisionAnalyzer(provider="ollama", model="qwen3.5:4b")
     results = await analyzer.analyze_reading_order(Path("doc.pdf"), pages=[1,2,3])
 """
 
@@ -221,163 +220,6 @@ class VisionProvider(Protocol):
 # ---------------------------------------------------------------------------
 # Provider implementations
 # ---------------------------------------------------------------------------
-
-
-class GeminiVisionProvider:
-    """Google Gemini vision provider (AI Studio or Vertex AI).
-
-    Uses a provider-wide BoundedSemaphore to cap concurrent Gemini API calls
-    across all threads/documents (default 25, configurable via
-    GEMINI_VISION_MAX_INFLIGHT env var). Without this, 25 document workers
-    each doing 5 concurrent heading-vision calls = 125 simultaneous API calls.
-
-    REMEDY-58: HTTP requests are bounded by an explicit per-call timeout and
-    retry a small number of times on transient 5xx / network failures. Without
-    this, long batches can wedge indefinitely on a single dropped-packet
-    response (observed on Left shards 0 and 1 during the 2026-04-06 canonical
-    run, 10+ hours stuck on a single Vertex AI request).
-    """
-
-    _gate_lock = threading.Lock()
-    _gate: threading.BoundedSemaphore | None = None
-    _gate_limit: int = 0
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str = "gemini-3.1-flash-lite-preview",
-        *,
-        thinking_level: str | None = None,
-        vertexai: bool = False,
-        gcp_project: str = "",
-        gcp_location: str = "global",
-        max_inflight: int | None = None,
-        http_timeout_seconds: float | None = None,
-        http_retry_attempts: int | None = None,
-    ) -> None:
-        self.api_key = api_key
-        self.model = model
-        self.thinking_level = thinking_level
-        self.vertexai = vertexai
-        self.gcp_project = gcp_project
-        self.gcp_location = gcp_location
-        self.max_inflight = max_inflight or int(
-            os.environ.get("GEMINI_VISION_MAX_INFLIGHT", "25")
-        )
-        self.http_timeout_seconds = http_timeout_seconds or float(
-            os.environ.get("GEMINI_HTTP_TIMEOUT_SECONDS", "60")
-        )
-        self.http_retry_attempts = http_retry_attempts or int(
-            os.environ.get("GEMINI_HTTP_RETRY_ATTEMPTS", "3")
-        )
-        # Built lazily on first use so google-genai stays an optional dep.
-        self._cached_http_options: Any | None = None
-
-    def _get_http_options(self) -> Any:
-        """Lazy-build HttpOptions on first use (keeps google-genai optional)."""
-        if self._cached_http_options is not None:
-            return self._cached_http_options
-        from google.genai import types
-
-        retry_opts = types.HttpRetryOptions(
-            attempts=max(1, self.http_retry_attempts),
-            initial_delay=1.0,
-            max_delay=10.0,
-            exp_base=2.0,
-            jitter=0.1,
-            http_status_codes=[429, 500, 502, 503, 504],
-        )
-        self._cached_http_options = types.HttpOptions(
-            timeout=int(self.http_timeout_seconds * 1000),  # ms
-            retry_options=retry_opts,
-        )
-        return self._cached_http_options
-
-    @classmethod
-    def _get_gate(cls, limit: int) -> threading.BoundedSemaphore:
-        with cls._gate_lock:
-            if cls._gate is None or cls._gate_limit != limit:
-                cls._gate = threading.BoundedSemaphore(value=max(1, limit))
-                cls._gate_limit = limit
-            return cls._gate
-
-    async def analyze_image(
-        self,
-        image_path: Path | None,
-        prompt: str,
-        *,
-        max_tokens: int = 4096,
-        response_format: dict | None = None,
-    ) -> str:
-        from google import genai
-        from google.genai import types
-
-        http_options = self._get_http_options()
-        if self.vertexai:
-            if self.api_key:
-                # Express mode: authenticate via Vertex AI Express API key
-                # instead of ADC. The API key format starts with "AQ.".
-                # See https://cloud.google.com/vertex-ai/generative-ai/docs/start/express-mode
-                client = genai.Client(
-                    vertexai=True,
-                    api_key=self.api_key,
-                    http_options=http_options,
-                )
-            else:
-                client = genai.Client(
-                    vertexai=True,
-                    project=self.gcp_project,
-                    location=self.gcp_location,
-                    http_options=http_options,
-                )
-        else:
-            client = genai.Client(api_key=self.api_key, http_options=http_options)
-        if image_path is not None:
-            raw = image_path.read_bytes()
-            suffix = image_path.suffix.lstrip(".").lower()
-            mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(
-                suffix, "image/png"
-            )
-            parts = [
-                types.Part.from_bytes(data=raw, mime_type=mime),
-                prompt,
-            ]
-        else:
-            parts = [prompt]
-        config = types.GenerateContentConfig(
-            max_output_tokens=max_tokens,
-            temperature=0.2,
-        )
-        if self.thinking_level and self.model.startswith("gemini-3"):
-            config.thinking_config = types.ThinkingConfig(
-                thinking_level=self.thinking_level
-            )
-
-        gate = self._get_gate(self.max_inflight)
-        await asyncio.to_thread(gate.acquire)
-        try:
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=self.model,
-                contents=parts,
-                config=config,
-            )
-        finally:
-            gate.release()
-
-        if response.usage_metadata:
-            tracker.record(
-                f"gemini-vision:{self.model}",
-                input_tokens=response.usage_metadata.prompt_token_count or 0,
-                output_tokens=response.usage_metadata.candidates_token_count or 0,
-                thought_tokens=getattr(
-                    response.usage_metadata,
-                    "thoughts_token_count",
-                    0,
-                )
-                or 0,
-            )
-        return response.text
 
 
 class OllamaVisionProvider:
@@ -841,18 +683,15 @@ def create_provider(
     base_url: str = "",
     stream: bool = False,
     reasoning_effort: str = "low",
-    vertexai: bool = False,
-    gcp_project: str = "",
-    gcp_location: str = "global",
 ) -> VisionProvider:
     """Factory: create a vision provider by name.
 
     Parameters
     ----------
     provider:
-        One of "gemini", "ollama", "openai".
+        One of "ollama", "openai".
     api_key:
-        API key (required for gemini/openai, optional for ollama).
+        API key (required for OpenAI-compatible providers, optional for Ollama).
     model:
         Model name override. Defaults depend on provider.
     base_url:
@@ -861,26 +700,10 @@ def create_provider(
         Whether to enable streaming (Ollama only).
     reasoning_effort:
         Reasoning effort level for Ollama compat endpoint (low/medium/high).
-    vertexai:
-        Use Vertex AI instead of AI Studio (Gemini only).
-    gcp_project:
-        GCP project ID for Vertex AI.
-    gcp_location:
-        GCP region for Vertex AI.
     """
     p = provider.lower().strip()
 
-    if p == "gemini":
-        gemini_model = model or "gemini-3.1-flash-lite-preview"
-        return GeminiVisionProvider(
-            api_key=api_key,
-            model=gemini_model,
-            thinking_level=_default_gemini_thinking_level(gemini_model),
-            vertexai=vertexai,
-            gcp_project=gcp_project,
-            gcp_location=gcp_location,
-        )
-    elif p == "ollama":
+    if p == "ollama":
         return OllamaVisionProvider(
             base_url=base_url or "http://localhost:11434/v1",
             api_key=api_key or "ollama",
@@ -897,34 +720,27 @@ def create_provider(
     else:
         raise ValueError(
             f"Unknown vision provider '{provider}'. "
-            f"Choose from: gemini, ollama, openai"
+            f"Choose from: ollama, openai"
         )
 
 
 def create_provider_from_config(config) -> VisionProvider | None:
     """Create a vision provider from a ``PipelineConfig``.
 
-    Uses the existing ``api.llm_backend`` setting to pick the provider,
-    and the already-configured API keys / model names / base URLs.
+    Uses the configured Ollama API key, model names, and base URLs.
     Returns ``None`` if no usable credentials are found.
     """
-    backend = config.api.llm_backend  # "ollama" or "gemini"
-
-    if backend == "gemini":
-        key = config.api.gemini_api_key
-        use_vertex = getattr(config.api, "gemini_vertexai", False)
-        if not key and not use_vertex:
-            return None
-        return GeminiVisionProvider(
-            api_key=key,
-            model=config.api.gemini_model or "gemini-3.1-flash-lite-preview",
-            thinking_level=config.api.gemini_primary_thinking_level,
-            vertexai=use_vertex,
-            gcp_project=getattr(config.api, "gemini_gcp_project", ""),
-            gcp_location=getattr(config.api, "gemini_gcp_location", "global"),
+    backend = str(getattr(config.api, "llm_backend", "") or "ollama").strip().lower()
+    if backend != "ollama":
+        return create_provider(
+            backend,
+            api_key=config.api.api_key,
+            model=config.api.vision_model,
+            base_url=config.api.vision_base_url or config.api.base_url,
+            stream=getattr(config.api, "ollama_stream", False),
+            reasoning_effort=getattr(config.api, "ollama_reasoning_effort", "low"),
         )
 
-    # ollama — always available (local, no key needed).
     vision_urls = []
     primary = config.api.vision_base_url or config.api.base_url or "http://localhost:11434/v1"
     vision_urls.append(primary)
@@ -945,19 +761,6 @@ def create_escalation_provider(config) -> VisionProvider | None:
     model = config.api.escalation_model
     if not model:
         return None
-    if backend == "gemini":
-        key = config.api.gemini_api_key
-        use_vertex = getattr(config.api, "gemini_vertexai", False)
-        if not key and not use_vertex:
-            return None
-        return GeminiVisionProvider(
-            api_key=key,
-            model=model,
-            thinking_level=config.api.gemini_escalation_thinking_level,
-            vertexai=use_vertex,
-            gcp_project=getattr(config.api, "gemini_gcp_project", ""),
-            gcp_location=getattr(config.api, "gemini_gcp_location", "global"),
-        )
     base_url = ""
     if backend == "ollama":
         base_url = (
@@ -966,20 +769,12 @@ def create_escalation_provider(config) -> VisionProvider | None:
         )
     return create_provider(
         backend,
-        api_key=config.api.api_key if backend == "ollama" else config.api.gemini_api_key,
+        api_key=config.api.api_key,
         model=model,
         base_url=base_url,
         stream=getattr(config.api, "ollama_stream", False),
         reasoning_effort=getattr(config.api, "ollama_reasoning_effort", "low"),
     )
-
-
-def _default_gemini_thinking_level(model: str) -> str | None:
-    if model.startswith("gemini-3.1-pro-preview"):
-        return "low"
-    if model.startswith("gemini-3"):
-        return "minimal"
-    return None
 
 
 # ---------------------------------------------------------------------------

@@ -58,17 +58,7 @@ class APIConfig:
     max_concurrent_calls: int = 5
     max_retries: int = 3
     retry_backoff_base: float = 2.0
-    llm_backend: str = "ollama"              # "ollama" or "gemini"
-    gemini_api_key: str = ""                 # GEMINI_API_KEY
-    gemini_model: str = "gemini-3.1-flash-lite-preview"  # Tier 1 Gemini model
-    gemini_vertexai: bool = False            # Use Vertex AI instead of AI Studio
-    gemini_gcp_project: str = ""             # GCP project ID for Vertex AI
-    gemini_gcp_location: str = "global"      # GCP region for Vertex AI
-    gemini_primary_thinking_level: str = "minimal"  # Gemini 3 primary thinking level
-    gemini_escalation_thinking_level: str = "low"   # Gemini 3 escalation thinking level
-    gemini_batch_enabled: bool = False       # Use Batch API for 50% cost savings
-    gemini_batch_poll_interval: float = 30.0 # Seconds between batch status polls
-    gemini_batch_timeout: float = 3600.0     # Max seconds to wait for a batch job
+    llm_backend: str = "ollama"              # Primary LLM backend
     liteparse_enabled: bool = False          # Use LiteParse for local text snapshots / triage
     liteparse_bin: str = "lit"               # LiteParse CLI binary
     liteparse_timeout_seconds: float = 30.0  # Hard timeout for LiteParse snapshot calls
@@ -314,46 +304,6 @@ def load_config(
         llm_backend=_env(
             "LLM_BACKEND",
             api_yml.get("llm_backend", "ollama"),
-        ),
-        gemini_api_key=_env(
-            "GEMINI_API_KEY",
-            api_yml.get("gemini_api_key", ""),
-        ),
-        gemini_model=_env(
-            "GEMINI_MODEL",
-            api_yml.get("gemini_model", "gemini-3.1-flash-lite-preview"),
-        ),
-        gemini_vertexai=_env_bool(
-            "GEMINI_VERTEXAI",
-            api_yml.get("gemini_vertexai", False),
-        ),
-        gemini_gcp_project=_env(
-            "GEMINI_GCP_PROJECT",
-            api_yml.get("gemini_gcp_project", ""),
-        ),
-        gemini_gcp_location=_env(
-            "GEMINI_GCP_LOCATION",
-            api_yml.get("gemini_gcp_location", "global"),
-        ),
-        gemini_primary_thinking_level=_env(
-            "GEMINI_PRIMARY_THINKING_LEVEL",
-            api_yml.get("gemini_primary_thinking_level", "minimal"),
-        ),
-        gemini_escalation_thinking_level=_env(
-            "GEMINI_ESCALATION_THINKING_LEVEL",
-            api_yml.get("gemini_escalation_thinking_level", "low"),
-        ),
-        gemini_batch_enabled=_env_bool(
-            "GEMINI_BATCH_ENABLED",
-            api_yml.get("gemini_batch_enabled", False),
-        ),
-        gemini_batch_poll_interval=_env_float(
-            "GEMINI_BATCH_POLL_INTERVAL",
-            api_yml.get("gemini_batch_poll_interval", 30.0),
-        ),
-        gemini_batch_timeout=_env_float(
-            "GEMINI_BATCH_TIMEOUT",
-            api_yml.get("gemini_batch_timeout", 3600.0),
         ),
         liteparse_enabled=_env_bool(
             "LITEPARSE_ENABLED",

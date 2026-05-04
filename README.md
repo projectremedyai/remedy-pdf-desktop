@@ -64,7 +64,7 @@ cd web && npm install && cd ..
 cp .env.example .env
 ```
 
-`.env.example` mostly contains local overrides and deployment settings; the file ships with no API keys required. Gemini is not part of the Remedy PDF Desktop deployment target, and the desktop workflow does not use Ollama Cloud. All LLM activity runs against a local Ollama runtime (default base URL `http://127.0.0.1:11500/v1`) with downloaded models.
+`.env.example` mostly contains local overrides and deployment settings; the file ships with no API keys required. The desktop workflow does not use Ollama Cloud. All LLM activity runs against a local Ollama runtime (default base URL `http://127.0.0.1:11500/v1`) with downloaded models.
 
 ### Run
 

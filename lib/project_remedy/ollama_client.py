@@ -382,19 +382,13 @@ class OllamaClient:
     ) -> str:
         """Raw generation interface for Vision Planner compatibility.
 
-        Accepts the same *spirit* of arguments as
-        :meth:`GeminiClient.generate_raw` so that ``grounder.py`` and
-        ``planner.py`` can call either client interchangeably.
-
         ``contents`` may contain:
 
         * plain strings (text prompts)
         * raw ``bytes`` (PNG image data)
-        * ``google.genai.types.Part`` objects (transparently unwrapped)
         * dicts already in OpenAI content-part format
 
-        ``config`` may be a ``google.genai.types.GenerateContentConfig``
-        (attributes extracted via ``getattr``) or ``None``.
+        ``config`` may be an object with generation attributes or ``None``.
 
         Returns the assistant's response text.
         """
@@ -444,7 +438,7 @@ class OllamaClient:
         Handles:
         * ``str``  -> text part
         * ``bytes`` -> base64 image_url part (assumes PNG)
-        * google.genai ``Part`` objects (``inline_data`` or ``text``)
+        * provider-style part objects (``inline_data`` or ``text``)
         * ``dict`` already in OpenAI format (pass-through)
         """
         # Plain text
@@ -461,7 +455,7 @@ class OllamaClient:
                 }
             ]
 
-        # google.genai Part object (avoid hard import)
+        # Provider part object (avoid hard import)
         if hasattr(item, "inline_data") and item.inline_data is not None:
             raw_bytes = getattr(item.inline_data, "data", None)
             mime = getattr(item.inline_data, "mime_type", "image/png") or "image/png"
@@ -478,7 +472,7 @@ class OllamaClient:
                     }
                 ]
 
-        # google.genai Part with text only
+        # Provider part with text only
         if hasattr(item, "text") and isinstance(getattr(item, "text", None), str):
             return [{"type": "text", "text": item.text}]
 

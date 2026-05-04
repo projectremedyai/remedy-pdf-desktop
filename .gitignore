@@ -55,7 +55,6 @@ APP_DEBUG_NOTES_*.md
 
 # Duplicate agent-instruction files (content lives in CLAUDE.md)
 /AGENTS.md
-/GEMINI.md
 
 # Agent/tool local state
 /entities.json

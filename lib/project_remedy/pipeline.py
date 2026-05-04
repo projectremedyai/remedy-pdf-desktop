@@ -44,14 +44,14 @@ from project_remedy.pdf_specialists import run_specialist_pdf_repair
 from project_remedy.pdf_vision import create_escalation_provider
 from project_remedy.office_acceptance import evaluate_office_acceptance, validate_office_package
 from project_remedy.office_remediator import OfficeRemediationResult, OfficeRemediator
-# StirlingClient no longer required — OCR via Gemini, PDF metadata via pikepdf
+# StirlingClient no longer required — OCR and PDF metadata are handled locally.
 from project_remedy.accessibility_strategies import RemediationStrategyRunner
 from project_remedy.html_strategy_remediator import HTMLStrategyRemediator
 from project_remedy.vision_planner.pipeline import run_vision_plan
 
 logger = logging.getLogger(__name__)
 
-# Type alias for the LLM client (OllamaClient or GeminiClient — same interface).
+# Type alias for the LLM client interface used by the pipeline.
 LLMClient = Any
 
 
@@ -201,47 +201,31 @@ class Pipeline:
         # Components -- initialised lazily by start().
         self._db = DatabaseManager(config.output.db_path)
 
-        # Select LLM client based on config.
-        if config.api.llm_backend == "gemini":
-            from project_remedy.gemini_client import GeminiClient
-            self._llm: LLMClient = GeminiClient(config)
-        else:
-            self._llm = OllamaClient(config)
+        self._llm: LLMClient = OllamaClient(config)
         self._escalation_llm: LLMClient | None = None
         self._escalation_attempts = 0
-        if config.api.escalation_model:
-            if config.api.escalation_backend == "gemini":
-                from project_remedy.gemini_client import GeminiClient
-
-                escalation_api = replace(
-                    config.api,
-                    gemini_model=config.api.escalation_model,
-                    gemini_batch_enabled=False,
-                )
-                escalation_config = replace(config, api=escalation_api)
-                self._escalation_llm = GeminiClient(escalation_config)
-            elif config.api.escalation_backend == "ollama":
-                escalation_concurrency = config.api.max_concurrent_calls
-                raw_limit = os.environ.get("OLLAMA_ESCALATION_MAX_INFLIGHT", "").strip()
-                if raw_limit:
-                    try:
-                        escalation_concurrency = max(1, int(raw_limit))
-                    except ValueError:
-                        logger.warning(
-                            "Invalid OLLAMA_ESCALATION_MAX_INFLIGHT=%r; using %d",
-                            raw_limit,
-                            escalation_concurrency,
-                        )
-                escalation_api = replace(
-                    config.api,
-                    llm_backend="ollama",
-                    base_url=(config.api.escalation_base_url or config.api.base_url),
-                    vision_model=config.api.escalation_model,
-                    text_model=config.api.escalation_model,
-                    max_concurrent_calls=escalation_concurrency,
-                )
-                escalation_config = replace(config, api=escalation_api)
-                self._escalation_llm = OllamaClient(escalation_config)
+        if config.api.escalation_model and config.api.escalation_backend == "ollama":
+            escalation_concurrency = config.api.max_concurrent_calls
+            raw_limit = os.environ.get("OLLAMA_ESCALATION_MAX_INFLIGHT", "").strip()
+            if raw_limit:
+                try:
+                    escalation_concurrency = max(1, int(raw_limit))
+                except ValueError:
+                    logger.warning(
+                        "Invalid OLLAMA_ESCALATION_MAX_INFLIGHT=%r; using %d",
+                        raw_limit,
+                        escalation_concurrency,
+                    )
+            escalation_api = replace(
+                config.api,
+                llm_backend="ollama",
+                base_url=(config.api.escalation_base_url or config.api.base_url),
+                vision_model=config.api.escalation_model,
+                text_model=config.api.escalation_model,
+                max_concurrent_calls=escalation_concurrency,
+            )
+            escalation_config = replace(config, api=escalation_api)
+            self._escalation_llm = OllamaClient(escalation_config)
 
         self._crawler = DocumentCrawler(config, self._db, campus=campus)
         self._downloader = DocumentDownloader(
@@ -391,17 +375,11 @@ class Pipeline:
             report.average_lighthouse_score = 0.0
             report.warning_documents = sum(1 for j in all_jobs if j.warning_message)
             report.warning_breakdown = self._compute_warning_breakdown(all_jobs)
-            if self._config.api.llm_backend == "gemini":
-                report.primary_model = self._config.api.gemini_model
-                report.escalation_model = (
-                    self._config.api.escalation_model if self._escalation_llm else ""
-                )
-                report.escalation_count = self._escalation_attempts
-                report.thought_tokens = getattr(self._llm, "total_thought_tokens", 0) + (
-                    getattr(self._escalation_llm, "total_thought_tokens", 0)
-                    if self._escalation_llm
-                    else 0
-                )
+            report.primary_model = self._config.api.text_model
+            report.escalation_model = (
+                self._config.api.escalation_model if self._escalation_llm else ""
+            )
+            report.escalation_count = self._escalation_attempts
             report.total_api_cost_estimate = self._estimate_api_cost()
             report.duration_seconds = time.monotonic() - t0
             logger.info("Document-only run complete in %.1fs.", report.duration_seconds)
@@ -417,17 +395,14 @@ class Pipeline:
         )
         report.extracted = len(extracted_jobs)
 
-        # Stage 4-5: Convert (plan + generate) — batch mode if available
+        # Stage 4-5: Convert (plan + generate)
         logger.info("=== Stage 4-5: Convert ===")
         to_convert = await self._db.get_jobs_by_status(
             JobStatus.EXTRACTED, campus_id=self._campus_id or None
         )
-        if hasattr(self._llm, "batch_enabled") and self._llm.batch_enabled and to_convert:
-            converted_jobs = await self._run_conversion_batched(to_convert, report)
-        else:
-            converted_jobs = await self._run_stage(
-                to_convert, self._convert_one, "conversion", report
-            )
+        converted_jobs = await self._run_stage(
+            to_convert, self._convert_one, "conversion", report
+        )
         report.converted = len(converted_jobs)
 
         # Stage 6: Vision
@@ -497,17 +472,11 @@ class Pipeline:
         report.average_lighthouse_score = self._compute_avg_lighthouse(all_jobs)
         report.warning_documents = sum(1 for j in all_jobs if j.warning_message)
         report.warning_breakdown = self._compute_warning_breakdown(all_jobs)
-        if self._config.api.llm_backend == "gemini":
-            report.primary_model = self._config.api.gemini_model
-            report.escalation_model = (
-                self._config.api.escalation_model if self._escalation_llm else ""
-            )
-            report.escalation_count = self._escalation_attempts
-            report.thought_tokens = getattr(self._llm, "total_thought_tokens", 0) + (
-                getattr(self._escalation_llm, "total_thought_tokens", 0)
-                if self._escalation_llm
-                else 0
-            )
+        report.primary_model = self._config.api.text_model
+        report.escalation_model = (
+            self._config.api.escalation_model if self._escalation_llm else ""
+        )
+        report.escalation_count = self._escalation_attempts
         report.total_api_cost_estimate = self._estimate_api_cost()
         report.duration_seconds = time.monotonic() - t0
 
@@ -575,16 +544,13 @@ class Pipeline:
         )
         processed.extend(extracted)
 
-        # Stage 4-5: Convert (batch mode if available)
+        # Stage 4-5: Convert
         to_convert = await self._db.get_jobs_by_status(
             JobStatus.EXTRACTED, campus_id=self._campus_id or None
         )
-        if hasattr(self._llm, "batch_enabled") and self._llm.batch_enabled and to_convert:
-            converted = await self._run_conversion_batched(to_convert, report)
-        else:
-            converted = await self._run_stage(
-                to_convert, self._convert_one, "conversion", report
-            )
+        converted = await self._run_stage(
+            to_convert, self._convert_one, "conversion", report
+        )
         processed.extend(converted)
 
         # Stage 6: Vision
@@ -654,9 +620,6 @@ class Pipeline:
     # ------------------------------------------------------------------
     # Internal: per-job stage executors
     # ------------------------------------------------------------------
-
-    def _gemini_escalation_enabled(self) -> bool:
-        return self._escalation_llm is not None
 
     def _note_escalation(self, stage: str, job: DocumentJob, reason: str) -> None:
         self._escalation_attempts += 1
@@ -739,207 +702,6 @@ class Pipeline:
             self._note_escalation("conversion", job, str(exc))
             job.error_message = ""
             return await self._convert_with(self._escalation_converter, job)
-
-    async def _run_conversion_batched(
-        self,
-        jobs: list[DocumentJob],
-        report: PipelineReport,
-    ) -> list[DocumentJob]:
-        """Run conversion using Gemini Batch API (50% cost savings).
-
-        Splits conversion into two batch rounds:
-          1. Planning (all jobs in one batch)
-          2. HTML generation (all fragments in one batch)
-        """
-        if not jobs:
-            return []
-
-        logger.info(
-            "Running batched conversion for %d job(s).", len(jobs)
-        )
-
-        # Round 1: Batch all planning calls.
-        plan_requests = []
-        valid_jobs = []
-        for job in jobs:
-            if not job.ocr_markdown:
-                logger.warning("Job %s has no OCR markdown, skipping.", job.id)
-                job.status = JobStatus.FAILED
-                job.error_message = "No OCR content for conversion."
-                await self._db.update_job(job)
-                report.errors.append(f"No OCR content for {job.id}")
-                continue
-
-            job.status = JobStatus.PLANNING
-            await self._db.update_job(job)
-            valid_jobs.append(job)
-            plan_requests.append({
-                "request_id": f"plan-{job.id}",
-                "messages": self._converter.prepare_plan_messages(job),
-                "max_tokens": 8192,
-                "temperature": 0.3,
-                "thinking": True,
-            })
-
-        if not plan_requests:
-            return []
-
-        logger.info("Batch Round 1: Submitting %d planning requests.", len(plan_requests))
-        try:
-            plan_results = await self._llm.batch_chat(
-                plan_requests,
-                display_name=f"plan-{self._campus_id or 'all'}-{len(plan_requests)}jobs",
-            )
-        except Exception as exc:
-            logger.error("Batch planning failed: %s. Falling back to inline.", exc)
-            return await self._run_stage(jobs, self._convert_one, "conversion", report)
-
-        # Apply planning results.
-        planned_jobs = []
-        converted_jobs: list[DocumentJob] = []
-        for job, plan_text in zip(valid_jobs, plan_results):
-            if not plan_text or not plan_text.strip():
-                if self._escalation_converter:
-                    self._note_escalation(
-                        "conversion",
-                        job,
-                        "batch planning returned empty result",
-                    )
-                    try:
-                        job.error_message = ""
-                        converted_jobs.append(
-                            await self._convert_with(self._escalation_converter, job)
-                        )
-                    except Exception as exc:
-                        job.status = JobStatus.FAILED
-                        job.error_message = str(exc)
-                        await self._db.update_job(job)
-                        report.errors.append(f"conversion failed for {job.id}: {exc}")
-                else:
-                    job.status = JobStatus.FAILED
-                    job.error_message = "Batch planning returned empty result."
-                    await self._db.update_job(job)
-                    report.errors.append(f"Empty plan for {job.id}")
-                continue
-
-            await self._converter.apply_plan_result(job, plan_text)
-            planned_jobs.append(job)
-
-        if not planned_jobs:
-            return []
-
-        # Round 2: Batch all generation calls.
-        gen_requests = []
-        job_gen_map: dict[str, tuple[DocumentJob, Any]] = {}
-
-        for job in planned_jobs:
-            job.status = JobStatus.CONVERTING
-            await self._db.update_job(job)
-            structured, prompts = await self._converter.prepare_generation_prompts(job)
-            job_gen_map[job.id] = (job, structured)
-            gen_requests.extend(prompts)
-
-        logger.info(
-            "Batch Round 2: Submitting %d generation requests for %d jobs.",
-            len(gen_requests), len(planned_jobs),
-        )
-
-        try:
-            gen_results = await self._llm.batch_chat(
-                gen_requests,
-                display_name=f"gen-{self._campus_id or 'all'}-{len(gen_requests)}frags",
-            )
-        except Exception as exc:
-            logger.error("Batch generation failed: %s. Falling back to inline.", exc)
-            # Inline fallback for remaining planned jobs.
-            fallback_results = []
-            for job in planned_jobs:
-                try:
-                    await self._converter.generate(job)
-                    fallback_results.append(job)
-                except Exception as e:
-                    job.status = JobStatus.FAILED
-                    job.error_message = str(e)
-                    await self._db.update_job(job)
-                    report.errors.append(f"conversion failed for {job.id}: {e}")
-            return fallback_results
-
-        # Map generation results back to jobs.
-        result_map: dict[str, str] = {}
-        for prompt, result_text in zip(gen_requests, gen_results):
-            rid = prompt["request_id"]
-            result_map[rid] = result_text or ""
-
-        for job_id, (job, structured) in job_gen_map.items():
-            try:
-                front_key = f"gen-{job_id}-front"
-                front_html = result_map.get(front_key, "")
-                missing_section_output = any(
-                    not result_map.get(f"gen-{job_id}-{section.page_key}", "").strip()
-                    for section in structured.sections
-                )
-                missing_front_output = bool(
-                    structured.front_matter_markdown.strip() and not front_html.strip()
-                )
-                if missing_section_output or missing_front_output:
-                    if self._escalation_converter:
-                        self._note_escalation(
-                            "conversion",
-                            job,
-                            "batch generation returned empty fragment output",
-                        )
-                        job.error_message = ""
-                        converted_jobs.append(
-                            await self._convert_with(self._escalation_converter, job)
-                        )
-                        continue
-                    if not front_html:
-                        front_html = self._converter._generate_front_matter_fallback(
-                            structured.title
-                        )
-                elif not front_html:
-                    front_html = self._converter._generate_front_matter_fallback(
-                        structured.title
-                    )
-                # Ensure H1
-                if "<h1" not in front_html.lower():
-                    from project_remedy.converter import HTMLConverter
-                    front_html = (
-                        f"<h1>{structured.title}</h1>\n{front_html}"
-                    ).strip()
-
-                section_bodies = {}
-                for section in structured.sections:
-                    sec_key = f"gen-{job_id}-{section.page_key}"
-                    body = result_map.get(sec_key, "")
-                    section_bodies[section.page_key] = (
-                        self._converter._strip_duplicate_heading(body, section.title)
-                        if body else ""
-                    )
-
-                await self._converter.assemble_from_fragments(
-                    job, structured, front_html, section_bodies
-                )
-                converted_jobs.append(job)
-                logger.info("Batch conversion complete for job %s", job.id)
-
-            except Exception as exc:
-                if self._escalation_converter:
-                    self._note_escalation("conversion", job, f"batch assembly failed: {exc}")
-                    try:
-                        job.error_message = ""
-                        converted_jobs.append(
-                            await self._convert_with(self._escalation_converter, job)
-                        )
-                        continue
-                    except Exception as esc_exc:
-                        exc = esc_exc
-                job.status = JobStatus.FAILED
-                job.error_message = f"Batch assembly failed: {exc}"
-                await self._db.update_job(job)
-                report.errors.append(f"conversion failed for {job.id}: {exc}")
-
-        return converted_jobs
 
     async def _run_pdf_remediation_batched(
         self,
@@ -1138,12 +900,6 @@ class Pipeline:
             planner_client = self._escalation_llm
         elif hasattr(self._llm, "generate_raw"):
             planner_client = self._llm
-        elif self._config.api.llm_backend == "gemini":
-            from project_remedy.gemini_client import GeminiClient
-
-            planner_client = GeminiClient(self._config)
-            await planner_client.start()
-            owns_client = True
 
         try:
             return await run_specialist_pdf_repair(
@@ -1364,7 +1120,6 @@ class Pipeline:
             and job.status != JobStatus.PDF_REMEDIATED
         ):
             from project_remedy.vision_planner.harness import VisionPlannerHarness
-            from project_remedy.gemini_client import GeminiClient
 
             self._note_escalation(
                 "pdf_remediation",
@@ -1375,13 +1130,7 @@ class Pipeline:
             trace_path = output_path.with_suffix(".vision_trace.json")
             vp_pdf_output = output_path.with_suffix(".vp.pdf")
             harness = VisionPlannerHarness()
-
-            # Use default Gemini client (or Ollama if configured)
-            if self._config.api.llm_backend == "gemini":
-                vp_client: Any = GeminiClient(self._config)
-                await vp_client.start()
-            else:
-                vp_client = self._llm
+            vp_client: Any = self._llm
 
             try:
                 vision_result = await run_vision_plan(
@@ -1778,18 +1527,9 @@ class Pipeline:
     def _estimate_api_cost(self) -> float:
         """Rough cost estimate based on cumulative token usage.
 
-        Pricing varies by backend:
-        - Ollama Cloud: ~$0.01/1K input, ~$0.03/1K output (conservative)
-        - Gemini: model-aware pricing via GeminiClient usage buckets
+        Ollama Cloud pricing is estimated at ~$0.01/1K input and
+        ~$0.03/1K output.
         """
-        if self._config.api.llm_backend == "gemini":
-            total = 0.0
-            if hasattr(self._llm, "estimate_cost"):
-                total += self._llm.estimate_cost()
-            if self._escalation_llm and hasattr(self._escalation_llm, "estimate_cost"):
-                total += self._escalation_llm.estimate_cost()
-            return total
-
         inp = self._llm.total_input_tokens
         out = self._llm.total_output_tokens
         input_cost = (inp / 1000) * 0.01

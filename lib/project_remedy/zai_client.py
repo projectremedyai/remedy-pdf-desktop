@@ -161,10 +161,9 @@ class ZaiClient:
     ) -> str:
         """Raw chat completion. Returns the assistant message content.
 
-        Accepts either ``messages`` (OpenAI format) or ``contents``
-        (Gemini-style) for compatibility with the VP pipeline.
+        Accepts either ``messages`` (OpenAI format) or ``contents`` for
+        compatibility with the VP pipeline.
         """
-        # Handle Gemini-style contents parameter
         if messages is None and contents is not None:
             messages = self._convert_contents_to_messages(contents)
         if messages is None:
@@ -254,7 +253,7 @@ class ZaiClient:
         return choices[0].get("message", {}).get("content", "")
 
     def _convert_contents_to_messages(self, contents: list) -> list[dict[str, Any]]:
-        """Convert Gemini-style contents list to OpenAI-style messages."""
+        """Convert a contents list to OpenAI-style messages."""
         messages: list[dict[str, Any]] = []
         for item in contents:
             if isinstance(item, str):
@@ -290,7 +289,7 @@ class ZaiClient:
                         ],
                     })
             elif isinstance(item, list):
-                # List of parts (Gemini multi-part content)
+                # List of mixed text/image parts.
                 parts = []
                 for part in item:
                     if isinstance(part, str):

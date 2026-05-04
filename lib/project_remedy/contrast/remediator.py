@@ -46,7 +46,7 @@ class ContrastRemediator:
     Parameters
     ----------
     llm_client:
-        A GeminiClient or OllamaClient instance.
+        An LLM client instance.
     dpi:
         Resolution for page rendering.
     """

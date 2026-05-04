@@ -150,7 +150,7 @@ async def run_vision_plan(
         pdf_path: Input PDF file path.
         output_path: Where to write the trace JSON (optional).
         harness: VisionPlannerHarness instance.
-        client: LLM client (GeminiClient or OllamaClient) with generate_raw().
+        client: LLM client with generate_raw().
         model: Override model name (optional).
         config: PipelineConfig for veraPDF etc.
         evolution_loop: Optional EvolutionLoop for experiment tracking.

@@ -1,14 +1,14 @@
 """Centralized token usage tracker for all LLM API calls.
 
 Provides a thread-safe global counter that aggregates token usage
-across Gemini, Ollama, and standalone vision providers.
+across Ollama and standalone vision providers.
 
 Usage::
 
     from project_remedy.token_tracker import tracker
 
     # Record usage (called automatically by clients/providers):
-    tracker.record("gemini", input_tokens=100, output_tokens=50)
+    tracker.record("ollama", input_tokens=100, output_tokens=50)
 
     # Read totals:
     print(tracker.summary())

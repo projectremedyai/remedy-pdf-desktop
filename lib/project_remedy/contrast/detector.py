@@ -68,8 +68,7 @@ class ContrastDetector:
     Parameters
     ----------
     llm_client:
-        A GeminiClient or OllamaClient instance with ``vision()`` and
-        ``_generate()`` methods.
+        An LLM client instance with a ``vision()`` method.
     dpi:
         Resolution for page rendering (higher = more accurate, slower).
     """
@@ -191,63 +190,26 @@ class ContrastDetector:
     ) -> dict | None:
         """Call the AI vision model and parse JSON response.
 
-        Uses GeminiClient's internal _generate() with response_schema
-        for structured output. Falls back to vision() + manual JSON
-        parsing if _generate() is unavailable.
+        Uses the client's vision method and extracts the JSON object from the
+        model response.
         """
         try:
-            from google.genai import types
-
-            # Write image to a temp file for the vision call
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                 tmp.write(image_data)
                 tmp_path = Path(tmp.name)
 
             try:
-                # Use GeminiClient's _generate() for structured JSON output
-                parts = [
-                    types.Part.from_bytes(data=image_data, mime_type="image/png"),
-                    prompt,
-                ]
-                config = types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                    temperature=0.1,
-                    max_output_tokens=4096,
+                response_text = await self._client.vision(
+                    image_path=tmp_path,
+                    prompt=prompt + "\n\nReturn ONLY valid JSON.",
                 )
-                response_text = await self._client._generate(
-                    contents=parts,
-                    config=config,
-                )
-                return json.loads(response_text)
+                import re
+                json_match = re.search(r'\{[\s\S]*\}', response_text)
+                if json_match:
+                    return json.loads(json_match.group(0))
+                return None
             finally:
                 tmp_path.unlink(missing_ok=True)
-
-        except AttributeError:
-            # Fallback: client doesn't have _generate() (e.g. OllamaClient)
-            # Use vision() and parse JSON manually
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    tmp.write(image_data)
-                    tmp_path = Path(tmp.name)
-
-                try:
-                    response_text = await self._client.vision(
-                        image_path=tmp_path,
-                        prompt=prompt + "\n\nReturn ONLY valid JSON.",
-                    )
-                    # Try to extract JSON from the response
-                    import re
-                    json_match = re.search(r'\{[\s\S]*\}', response_text)
-                    if json_match:
-                        return json.loads(json_match.group(0))
-                    return None
-                finally:
-                    tmp_path.unlink(missing_ok=True)
-            except Exception:
-                logger.exception("AI vision call failed for contrast detection")
-                return None
-
         except Exception:
             logger.exception("AI vision call failed for contrast detection")
             return None

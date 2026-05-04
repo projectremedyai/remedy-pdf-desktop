@@ -524,17 +524,6 @@ def _describe_math_strategy_runtime() -> tuple[bool, str]:
     config = _load_manual_strategy_config()
     backend = str(getattr(config.api, "llm_backend", "") or "ollama").strip().lower()
 
-    if backend == "gemini":
-        if not config.api.gemini_api_key and not getattr(config.api, "gemini_vertexai", False):
-            return (
-                False,
-                "Math-related residuals were detected, but math formula tagging needs a vision model. No on-device model is installed and Gemini/Vertex credentials are not configured.",
-            )
-        return (
-            True,
-            "Math-related residuals were detected. Uses the configured Gemini/Vertex vision service to detect formulas; page images may be sent over the network.",
-        )
-
     if backend == "ollama":
         endpoint = str(config.api.vision_base_url or config.api.base_url or "http://localhost:11434/v1").strip()
         if _is_loopback_url(endpoint):

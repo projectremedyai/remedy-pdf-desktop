@@ -69,14 +69,8 @@ def build_runtime_layout(config) -> RuntimeLayout:
 
     backend = str(getattr(api, "llm_backend", "") or "").strip() or "ollama"
 
-    # Show the actual vision model being used, not just the Ollama config field.
-    if backend == "gemini":
-        gemini_model = str(getattr(api, "gemini_model", "") or "").strip()
-        vision_model = f"{gemini_model} (Vertex AI)" if getattr(api, "gemini_vertexai", False) else gemini_model
-        vision_eps = ["Vertex AI"]
-    else:
-        vision_model = str(getattr(api, "vision_model", "") or "").strip()
-        vision_eps = vision_endpoints
+    vision_model = str(getattr(api, "vision_model", "") or "").strip()
+    vision_eps = vision_endpoints
 
     return RuntimeLayout(
         llm_backend=backend,

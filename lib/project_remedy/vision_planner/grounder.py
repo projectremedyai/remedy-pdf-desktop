@@ -1,8 +1,7 @@
 """Grounder: render PDF pages and call a vision model for semantic analysis.
 
-Supports both GeminiClient and OllamaClient as the backend.  The caller
-passes whichever client ``tier3_retry`` constructed; the grounder detects
-the client type at runtime so it can build the right content format.
+The caller passes a generate_raw-capable client; image bytes and text are
+sent in the generic content format understood by the local runtime client.
 """
 
 from __future__ import annotations
@@ -18,28 +17,8 @@ import fitz  # PyMuPDF
 logger = logging.getLogger(__name__)
 
 
-def _is_gemini_client(client: Any) -> bool:
-    """Return *True* if *client* is a GeminiClient (duck-type check).
-
-    Uses attribute probing instead of ``isinstance`` so that this module
-    does not need to import ``google.genai`` (which may not be installed
-    when running with the Ollama backend only).
-    """
-    return hasattr(client, "_client") and hasattr(
-        getattr(client, "_client", None) or object(), "aio"
-    )
-
-
 def _extract_response_text(response: Any) -> str:
-    """Extract text content from a Gemini API response or a plain string.
-
-    GeminiClient.generate_raw() returns a plain ``str``, while legacy code
-    paths that call genai.Client directly pass through a response object with
-    a ``.text`` attribute. Without the isinstance branch, str responses were
-    silently dropped: `response.text` on a str raised AttributeError, the
-    except clause returned "", and every grounder page parsed as empty JSON
-    with confidence 0.0. This broke Tier 3 Vision Planner entirely.
-    """
+    """Extract text content from a model response or plain string."""
     if isinstance(response, str):
         return response.strip()
     try:
@@ -87,39 +66,16 @@ async def run_grounder(
         harness_messages = harness.build_grounder_prompt(b64, page_dims)
         prompts.append(harness_messages)
 
-        # Build content parts appropriate for the backend
         text_content = harness_messages[0].get("content", "") if harness_messages else ""
-
-        if _is_gemini_client(client):
-            # GeminiClient — use google.genai types
-            from google.genai import types
-
-            parts: list[Any] = [
-                types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
-                text_content,
-            ]
-            gen_config: Any = types.GenerateContentConfig(
-                max_output_tokens=16384,
-                temperature=0.2,
-            )
-            # Get tools (if harness defines them)
-            tools = harness.build_grounder_tools()
-            if tools:
-                gen_config.tools = tools
-        else:
-            # OllamaClient — pass raw bytes + text; generate_raw() handles
-            # conversion to the OpenAI content format.
-            parts = [img_bytes, text_content]
-            gen_config = None  # OllamaClient.generate_raw() uses sane defaults
+        parts = [img_bytes, text_content]
 
         # Call the vision model with thinking enabled for deeper reasoning
-        think = not _is_gemini_client(client)  # Ollama supports think=True
         try:
             response = await client.generate_raw(
                 contents=parts,
-                config=gen_config,
+                config=None,
                 model_override=model,
-                **({"think": True} if think else {}),
+                think=True,
             )
             raw = _extract_response_text(response)
             responses.append(raw)

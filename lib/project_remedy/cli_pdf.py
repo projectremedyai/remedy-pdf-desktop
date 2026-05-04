@@ -24,7 +24,6 @@ import json
 import re
 import sys
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 
 import click
@@ -41,7 +40,6 @@ from project_remedy.pdf_benchmark import (
     build_representative_corpus_manifest,
     default_manifest_path,
     load_corpus_manifest,
-    run_gemini_tier_benchmark,
     run_acceptance_sweep,
     run_ocr_benchmark,
     save_corpus_manifest,
@@ -857,8 +855,7 @@ def vision(
 ) -> None:
     """Analyze PDF with a vision model for reading order and contrast.
 
-    Uses the vision provider configured in config.yaml / .env
-    (api.llm_backend, GEMINI_API_KEY, etc.).
+    Uses the vision provider configured in config.yaml / .env.
     """
     from project_remedy.pdf_vision import VisionAnalyzer, create_provider_from_config
 
@@ -875,12 +872,12 @@ def vision(
     if provider is None:
         console.print(
             "[bold red]Error:[/bold red] No vision provider available. "
-            "Set GEMINI_API_KEY or configure api.llm_backend in config.yaml."
+            "Configure the Ollama vision endpoint in config.yaml."
         )
         sys.exit(1)
 
     backend = cfg.api.llm_backend
-    model = cfg.api.gemini_model if backend == "gemini" else cfg.api.vision_model
+    model = cfg.api.vision_model
     console.print(
         f"[bold cyan]Vision analysis[/bold cyan] of [bold]{pdf_path.name}[/bold]\n"
         f"  Provider: {backend}  Model: {model}\n"
@@ -1348,134 +1345,6 @@ def benchmark_ocr(manifest: str | None, as_json: bool) -> None:
     console.print(table)
 
 
-# ---------------------------------------------------------------------------
-# benchmark-gemini-tier
-# ---------------------------------------------------------------------------
-
-
-@pdf_group.command("benchmark-gemini-tier")
-@click.option(
-    "--manifest",
-    default=None,
-    help="Path to a benchmark manifest JSON. Defaults to benchmarks/representative_pdf_manifest.json.",
-)
-@click.option("--env", default=None, help="Path to .env file.")
-@click.option("--config", default=None, help="Path to config.yaml file.")
-@click.option(
-    "--sample-count",
-    default=5,
-    show_default=True,
-    help="Maximum number of representative documents to run per model.",
-)
-@click.option(
-    "--file",
-    "files",
-    multiple=True,
-    help="Explicit PDF file(s) to include first in the benchmark sample set.",
-)
-@click.option(
-    "-o",
-    "--output",
-    default=None,
-    help="Output JSON path for the Gemini tier benchmark artifact.",
-)
-@click.option("--json", "as_json", is_flag=True, help="Output JSON to stdout.")
-def benchmark_gemini_tier(
-    manifest: str | None,
-    env: str | None,
-    config: str | None,
-    sample_count: int,
-    files: tuple[str, ...],
-    output: str | None,
-    as_json: bool,
-) -> None:
-    """Run the Gemini 3 Flash vs Flash-Lite benchmark with Pro escalation."""
-    manifest_path = Path(manifest) if manifest else default_manifest_path(Path.cwd())
-    corpus_manifest = load_corpus_manifest(manifest_path)
-    cfg = _load_pipeline_config(env, config)
-    if not cfg.api.gemini_api_key:
-        raise click.ClickException(
-            "Gemini benchmarking requires GEMINI_API_KEY in config or environment."
-        )
-
-    timestamp = re.sub(r"[^0-9]", "", datetime.now().isoformat())[:14]
-    output_path = Path(output) if output else (
-        Path.cwd() / "benchmarks" / f"gemini_tier_benchmark_{timestamp}.json"
-    )
-    run = run_gemini_tier_benchmark(
-        corpus_manifest,
-        config=cfg,
-        manifest_path=manifest_path,
-        output_root=output_path.with_suffix(""),
-        sample_count=sample_count,
-        explicit_files=[Path(file) for file in files],
-    )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(run.to_dict(), indent=2), encoding="utf-8")
-
-    if as_json:
-        console.print_json(json.dumps(run.to_dict(), default=str))
-        return
-
-    console.print(f"[bold green]Saved Gemini tier benchmark[/bold green] to {output_path}")
-    console.print(f"[bold]Representative samples:[/bold] {run.sample_count}")
-    table = Table(title="Gemini Tier Benchmark Summary")
-    table.add_column("Model")
-    table.add_column("HTML Pass", justify="right")
-    table.add_column("PDF Pass", justify="right")
-    table.add_column("Severe", justify="right")
-    table.add_column("Escalations", justify="right")
-    table.add_column("Empty", justify="right")
-    table.add_column("Median Latency", justify="right")
-    table.add_column("Cost / Doc", justify="right")
-    for summary in run.summaries:
-        table.add_row(
-            summary.model,
-            f"{summary.passed_count}/{summary.document_count}",
-            f"{summary.pdf_passed_count}/{summary.document_count}",
-            str(summary.severe_regressions),
-            str(summary.escalation_count),
-            str(summary.empty_output_count),
-            f"{summary.median_latency_seconds:.1f}s",
-            f"${summary.cost_per_document:.2f}",
-        )
-    console.print(table)
-
-    detail = Table(title="Gemini Tier Benchmark Samples")
-    detail.add_column("Model")
-    detail.add_column("Layout")
-    detail.add_column("File")
-    detail.add_column("HTML")
-    detail.add_column("PDF")
-    detail.add_column("Esc")
-    detail.add_column("Latency", justify="right")
-    for entry in run.entries:
-        pdf_status = "n/a" if entry.pdf_passed is None else ("pass" if entry.pdf_passed else "fail")
-        detail.add_row(
-            entry.model,
-            entry.layout_class,
-            entry.source_pdf_path.name,
-            "pass" if entry.html_passed else "fail",
-            pdf_status,
-            str(entry.escalation_count),
-            f"{entry.latency_seconds:.1f}s",
-        )
-    console.print(detail)
-    console.print(
-        Panel(
-            (
-                f"Recommended Tier 1 model: [bold]{run.decision.recommended_model}[/bold]\n"
-                f"{run.decision.rationale}\n"
-                f"Flash pass rate: {run.decision.flash_pass_rate:.1%}\n"
-                f"Flash-Lite pass rate: {run.decision.flash_lite_pass_rate:.1%}"
-            ),
-            title="Decision",
-            border_style="green",
-        )
-    )
-
-
-# ---------------------------------------------------------------------------
 # acceptance-sweep
 # ---------------------------------------------------------------------------
 
@@ -1770,12 +1639,8 @@ def _create_llm_client(cfg):
     if backend == "zai":
         from project_remedy.zai_client import ZaiClient
         return ZaiClient()
-    elif backend == "gemini":
-        from project_remedy.gemini_client import GeminiClient
-        return GeminiClient(cfg)
-    else:
-        from project_remedy.ollama_client import OllamaClient
-        return OllamaClient(cfg)
+    from project_remedy.ollama_client import OllamaClient
+    return OllamaClient(cfg)
 
 
 # ---------------------------------------------------------------------------

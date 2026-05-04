@@ -146,8 +146,8 @@ class PDFRemediator:
     config:
         Pipeline configuration (provides PDF remediation settings).
     llm_client:
-        An initialised LLM client (OllamaClient or GeminiClient) for
-        inference tasks (alt text, structure, language detection, OCR).
+        An initialised LLM client for inference tasks (alt text, structure,
+        language detection, OCR).
     """
 
     def __init__(
@@ -211,9 +211,9 @@ class PDFRemediator:
 
             working_pdf = pdf_path
 
-            # Step 2: Extract text — use Gemini OCR for scanned docs
+            # Step 2: Extract text with the configured OCR path for scanned docs.
             if triage.needs_ocr:
-                logger.info("Running Gemini OCR on scanned PDF: %s", pdf_path.name)
+                logger.info("Running OCR on scanned PDF: %s", pdf_path.name)
                 text = await self._llm.ocr(file_path=pdf_path)
             else:
                 text = self._extract_text(pdf_path)

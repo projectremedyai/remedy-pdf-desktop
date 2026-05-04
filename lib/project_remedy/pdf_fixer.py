@@ -259,7 +259,7 @@ def _run_async_callable_blocking(async_fn, *args, timeout: float | None = None, 
 
     Why this exists
     ---------------
-    ``pdf_fixer`` is synchronous, but Gemini/vision-powered fix helpers call
+    ``pdf_fixer`` is synchronous, but vision-powered fix helpers call
     ``async`` provider methods (``VisionProvider.analyze_image``).  When the
     fixer runs inside ``asyncio.to_thread`` (pipeline) or under a benchmark
     harness, calling ``asyncio.run()`` directly would raise
