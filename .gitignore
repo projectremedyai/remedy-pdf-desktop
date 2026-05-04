@@ -80,5 +80,10 @@ test_*.py
 *.spec.*
 !README.md
 
+# CI smoke tests are part of this repo.
+!tests/
+!tests/**/
+!tests/**/*.py
+
 # Screenshots / demo recordings — not part of source
 screenshots/

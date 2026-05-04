@@ -53,10 +53,11 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["backend/app", "lib/project_remedy"]
+packages = ["backend", "lib/project_remedy"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]
 testpaths = ["tests"]
 # Per-test timeout so a single hang cannot wedge the whole CI run.
 # Individual slow tests can override with @pytest.mark.timeout(N).

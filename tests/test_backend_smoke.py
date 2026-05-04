@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+import backend.app.routes_api as routes_api
+from backend.app.config import settings
+from backend.app.main import app
+from backend.app.ollama_runtime import LocalOllamaStatus
+from backend.app.routes_api import _safe_upload_name
+
+
+def test_health_endpoint_returns_security_headers(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "app_api_key", "")
+
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_api_key_auth_blocks_protected_api_routes(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "app_api_key", "test-secret")
+
+    with TestClient(app) as client:
+        protected_response = client.get("/api/jobs/missing-job")
+        health_response = client.get("/api/health")
+
+    assert protected_response.status_code == 401
+    assert protected_response.json() == {"detail": "Invalid or missing API key"}
+    assert health_response.status_code == 200
+
+
+def test_model_status_reports_local_runtime(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(settings, "app_api_key", "")
+    monkeypatch.setattr(settings, "ollama_model_tag", "qwen3.5:4b")
+
+    def fake_status() -> LocalOllamaStatus:
+        return LocalOllamaStatus(
+            reachable=True,
+            installed=True,
+            model_tag="qwen3.5:4b",
+            endpoint="http://127.0.0.1:11500/v1",
+            models_dir=tmp_path / "models",
+            size_bytes=3_400_000_000,
+        )
+
+    monkeypatch.setattr(routes_api, "get_local_ollama_status", fake_status)
+
+    with TestClient(app) as client:
+        response = client.get("/api/model/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["reachable"] is True
+    assert payload["installed"] is True
+    assert payload["model_tag"] == "qwen3.5:4b"
+    assert payload["endpoint"] == "http://127.0.0.1:11500/v1"
+    assert payload["models_dir"] == str(tmp_path / "models")
+    assert payload["size_mb"] == 3400.0
+    assert payload["default_model"]["tag"] == "qwen3.5:4b"
+
+
+def test_upload_name_is_confined_to_safe_basename() -> None:
+    assert _safe_upload_name(r"..\..\weird report?.pdf") == "weird_report_.pdf"
+    assert _safe_upload_name("\x00../../") == "upload"
+
+
+def test_removed_ai_provider_strings_stay_absent() -> None:
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=root,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+
+    text_suffixes = {
+        ".css",
+        ".example",
+        ".html",
+        ".js",
+        ".json",
+        ".md",
+        ".py",
+        ".rs",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+    text_names = {"Dockerfile", ".gitignore"}
+    forbidden_terms = ("ge" + "mini", "ge" + "nai")
+
+    matches: list[str] = []
+    for raw_name in result.stdout.decode("utf-8").split("\0"):
+        if not raw_name:
+            continue
+        path = root / raw_name
+        if path.suffix.lower() not in text_suffixes and path.name not in text_names:
+            continue
+        content = path.read_text(encoding="utf-8", errors="ignore").lower()
+        for term in forbidden_terms:
+            if term in content:
+                matches.append(f"{raw_name}: {term}")
+
+    assert matches == []
