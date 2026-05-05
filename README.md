@@ -28,7 +28,7 @@ Do not claim WCAG, PDF/UA, Section 508, ADA Title II, or EAA compliance on the s
 - Upload formats: `.pdf`, `.docx`, `.pptx`, `.xlsx`
 - Outputs: a remediated document, an HTML report (`*_acr.html`), and a results summary in the UI
 - Review signals surfaced in the UI: fixes applied, remaining issues, WCAG mapping summary, screen-reader readability score, visual-diff/manual-review flags, and an experimental faithful rebuild action for completed PDF jobs
-- Processing model: remediation runs locally on the machine hosting the app. If the on-device vision model is not installed yet, the frontend offers a one-time download from Hugging Face and then uses that model locally.
+- Processing model: remediation runs on the local machine. If the on-device vision model is not installed yet, the frontend offers a one-time download from Hugging Face and then uses that model locally.
 
 ## Pipelines
 
@@ -48,7 +48,8 @@ Word, PowerPoint, and Excel uploads use a separate Office remediator and still f
 ### Prerequisites
 
 - Python 3.11+
-- Node.js 18+
+- Node.js 22
+- Rust 1.77.2+ for the native Tauri shell
 - Optional: Java 17+ plus veraPDF for PDF/UA validation data in PDF reports
 - Optional: Ghostscript for additional PDF preprocessing and repair paths
 
@@ -64,9 +65,9 @@ cd web && npm install && cd ..
 cp .env.example .env
 ```
 
-`.env.example` mostly contains local overrides and deployment settings; the file ships with no API keys required. The desktop workflow does not use Ollama Cloud. All LLM activity runs against a local Ollama runtime (default base URL `http://127.0.0.1:11500/v1`) with downloaded models.
+`.env.example` contains optional local overrides. The app ships with no API keys required. The desktop workflow does not use Ollama Cloud. All LLM activity runs against a local Ollama runtime (default base URL `http://127.0.0.1:11500/v1`) with downloaded models.
 
-### Run
+### Run The Web UI During Development
 
 ```bash
 # Backend
@@ -78,50 +79,20 @@ cd web && npm run dev
 
 Open [http://localhost:5173](http://localhost:5173).
 
-On first launch, the frontend may ask you to download a local vision/text model (default `qwen3.5:4b`, ~3.4 GB) through the bundled local Ollama runtime. That download needs network access once; document processing after installation stays local to the machine running the app.
+### Run The Native App During Development
+
+```bash
+npm install
+npm run tauri:dev
+```
+
+The Tauri shell starts the local backend and local Ollama runtime for the desktop app. On first launch, the frontend may ask you to download a local vision/text model (default `qwen3.5:4b`, ~3.4 GB). That download needs network access once; document processing after installation stays local to the machine running the app.
 
 ### Verify
 
 ```bash
 pytest tests/ -v
 cd web && npm run lint && npm run build
-```
-
-## Production Deployment
-
-The repository includes two supported production paths:
-
-### Docker
-
-```bash
-API_KEY="$(openssl rand -hex 32)"
-docker build --build-arg VITE_APP_API_KEY="$API_KEY" -t remedy-pdf-desktop .
-docker run --rm -p 8000:8000 \
-  -e APP_API_KEY="$API_KEY" \
-  -e CORS_ORIGINS="https://your-domain.example" \
-  -v remedy-pdf-desktop-data:/app/data \
-  remedy-pdf-desktop
-```
-
-For private local-only containers you can omit `APP_API_KEY` and the matching
-`VITE_APP_API_KEY` build argument.
-
-### Ubuntu VPS
-
-`deploy/setup.sh` installs the app behind Caddy on Ubuntu, creates a production
-API key, builds the frontend with that key, and runs uvicorn as the non-root
-`remedy` user:
-
-```bash
-sudo APP_DOMAIN=your-domain.example bash deploy/setup.sh
-```
-
-Before publishing the service publicly, run:
-
-```bash
-bash scripts/verify_release.sh
-python -m pip_audit --skip-editable --ignore-vuln CVE-2026-3219
-cd web && npm audit --omit=dev
 ```
 
 ## Interpreting Results
@@ -138,6 +109,7 @@ cd web && npm audit --omit=dev
 - `lib/project_remedy/` — bundled remediation engine (import path retained; not renamed)
 - `web/` — React/Vite/Tailwind frontend (npm package `remedy-pdf-desktop-web`)
 - `src-tauri/` — Tauri desktop shell
+- `backend/project_remedy_backend.spec` — PyInstaller spec for the bundled backend sidecar
 
 ## Packaging Identity
 
