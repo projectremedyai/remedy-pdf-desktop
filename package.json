@@ -3,6 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "description": "Remedy PDF Desktop — standalone native document accessibility remediation app",
+  "license": "MIT",
   "scripts": {
     "build": "npm run web:build",
     "tauri": "tauri",

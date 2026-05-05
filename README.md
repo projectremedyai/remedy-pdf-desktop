@@ -151,4 +151,4 @@ These values are sourced from `src-tauri/tauri.conf.json` and the workspace mani
 
 ## License
 
-MIT
+MIT. See `LICENSE`.
