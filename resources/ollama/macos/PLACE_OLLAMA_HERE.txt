@@ -1,1 +1,0 @@
-Put the macOS Ollama standalone CLI binary here as `ollama`.

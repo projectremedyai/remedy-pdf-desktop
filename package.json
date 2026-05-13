@@ -10,7 +10,9 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "web:dev": "cd web && npm run dev",
-    "web:build": "cd web && npm run build"
+    "web:build": "cd web && npm run build",
+    "dist:mac": "bash scripts/release_macos.sh",
+    "dist:mac:dry": "bash scripts/release_macos.sh --dry-run"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

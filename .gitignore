@@ -40,11 +40,19 @@ web/dist/
 # OS
 .DS_Store
 default.profraw
+excalidraw.log
 
 # Build artifacts
 dist/
 build/
 *.spec~
+src-tauri/target/
+
+# Bundled native runtimes (downloaded at build time, not stored in git)
+/resources/ollama/macos/*
+!/resources/ollama/macos/README.md
+/resources/ollama/windows/*
+!/resources/ollama/windows/PLACE_OLLAMA_HERE.txt
 # Stray Vite code-split chunks if they land at repo root (should live under web/dist/)
 /product-name-*.js
 /*-*.js
