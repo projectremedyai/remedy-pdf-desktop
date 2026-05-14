@@ -219,6 +219,12 @@ export interface LocalModelInfo {
   ram_gb: number;
 }
 
+export interface AvailableLocalModel extends LocalModelInfo {
+  label: string;
+  recommended: boolean;
+  description: string;
+}
+
 export interface ModelStatus {
   reachable: boolean;
   installed: boolean;
@@ -227,6 +233,7 @@ export interface ModelStatus {
   model_tag: string;
   size_mb: number;
   default_model: LocalModelInfo;
+  available_models?: AvailableLocalModel[];
   error?: string | null;
 }
 

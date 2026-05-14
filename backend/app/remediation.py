@@ -745,6 +745,7 @@ async def run_remediation(job_id: str) -> None:
             })
 
         import queue as stdlib_queue
+        import time as _time
 
         fix_progress_q: stdlib_queue.Queue = stdlib_queue.Queue()
 
@@ -752,15 +753,35 @@ async def run_remediation(job_id: str) -> None:
             fix_progress_q.put(f"[{current}/{total}] {description}")
 
         async def _drain_fix_progress():
+            # A single vision-heavy fix (fix_reading_order on a dense scan,
+            # for example) can run for many minutes without firing another
+            # progress callback. Without a heartbeat the WebSocket idle
+            # watchdog in routes_api.progress_ws would trip and surface a
+            # spurious "Timeout waiting for progress" to the user even
+            # though the engine is still working. Send a no-op heartbeat
+            # every 30 s so the WS stays alive; the frontend filters them
+            # out of the activity log.
+            HEARTBEAT_INTERVAL = 30.0
+            last_event_at = _time.monotonic()
             while True:
+                emitted = False
                 try:
                     msg = fix_progress_q.get_nowait()
                     await _emit(job_id, {
                         "type": "status", "step": "remediation", "status": "running",
                         "message": msg,
                     })
+                    emitted = True
                 except stdlib_queue.Empty:
                     pass
+
+                now = _time.monotonic()
+                if emitted:
+                    last_event_at = now
+                elif now - last_event_at >= HEARTBEAT_INTERVAL:
+                    await _emit(job_id, {"type": "heartbeat"})
+                    last_event_at = now
+
                 await asyncio.sleep(0.3)
 
         drain_task = asyncio.create_task(_drain_fix_progress())

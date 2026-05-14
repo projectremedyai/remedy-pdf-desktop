@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   getModelStatus,
   streamModelDownload,
   type ModelStatus,
   type DownloadProgress,
+  type AvailableLocalModel,
 } from "../api";
 
 interface Props {
@@ -14,16 +15,44 @@ interface Props {
 export function ModelSetup({ onReady, onConfigureProvider }: Props) {
   const [status, setStatus] = useState<ModelStatus | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const [downloadingTag, setDownloadingTag] = useState<string | null>(null);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     getModelStatus().then(setStatus).catch(() => {});
   }, []);
 
-  function startDownload() {
+  const offerings: AvailableLocalModel[] = useMemo(() => {
+    if (status?.available_models && status.available_models.length > 0) {
+      return status.available_models;
+    }
+    // Fallback so the screen still renders if a stale backend is missing
+    // the available_models field. Mirrors the recommended default.
+    return [
+      {
+        tag: status?.model_tag ?? "gemma4:e4b",
+        label: "Gemma 4 E4B",
+        params: status?.default_model?.params ?? "4B effective",
+        size_gb: status?.default_model?.size_gb ?? 9.6,
+        ram_gb: status?.default_model?.ram_gb ?? 16,
+        recommended: true,
+        description: "Recommended local vision model.",
+      },
+    ];
+  }, [status]);
+
+  const activeTag =
+    selectedTag ??
+    offerings.find((m) => m.recommended)?.tag ??
+    offerings[0]?.tag ??
+    "gemma4:e4b";
+
+  function startDownload(tag: string) {
     setDownloading(true);
+    setDownloadingTag(tag);
     setError(null);
     setProgress({ downloaded_mb: 0, total_mb: 0 });
 
@@ -31,24 +60,26 @@ export function ModelSetup({ onReady, onConfigureProvider }: Props) {
       if (p.error) {
         setError(p.error);
         setDownloading(false);
+        setDownloadingTag(null);
         return;
       }
       if (p.done) {
         setDownloading(false);
+        setDownloadingTag(null);
         onReady();
         return;
       }
       setProgress(p);
-    });
+    }, tag);
   }
 
   function cancelDownload() {
     abortRef.current?.abort();
     setDownloading(false);
+    setDownloadingTag(null);
     setProgress(null);
   }
 
-  const model = status?.default_model;
   const pct =
     progress?.total_mb && progress.total_mb > 0
       ? Math.min(100, Math.round((progress.downloaded_mb ?? 0) / progress.total_mb * 100))
@@ -67,42 +98,76 @@ export function ModelSetup({ onReady, onConfigureProvider }: Props) {
             Set Up Vision Provider
           </h2>
           <p className="mt-2 text-sm text-text-muted">
-            Remedy PDF Desktop uses a bundled local Ollama runtime with the
-            <span className="font-medium text-text"> gemma4:e4b </span>
-            model by default. Cloud providers can be configured in Model Settings.
+            Remedy PDF Desktop ships a bundled local Ollama runtime. Pick a
+            local vision model below or configure a cloud provider in Model
+            Settings.
           </p>
         </div>
 
         {!downloading && (
           <>
+            <div className="mb-4 space-y-3">
+              {offerings.map((m) => {
+                const checked = m.tag === activeTag;
+                return (
+                  <label
+                    key={m.tag}
+                    className={`block cursor-pointer rounded-xl border px-4 py-4 text-left transition-colors ${
+                      checked
+                        ? "border-primary bg-primary/5"
+                        : "border-elevated bg-canvas hover:border-text-muted"
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="radio"
+                        name="local-model"
+                        checked={checked}
+                        onChange={() => setSelectedTag(m.tag)}
+                        className="mt-1 h-4 w-4 accent-primary"
+                      />
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base font-semibold text-text">
+                            {m.label}
+                          </span>
+                          {m.recommended && (
+                            <span className="rounded-full bg-primary/15 px-2 py-0.5 text-xs font-medium text-primary">
+                              Recommended
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-1 text-sm text-text-muted">
+                          {m.params} &middot; {m.size_gb} GB download &middot; ~{m.ram_gb} GB RAM
+                        </div>
+                        <div className="mt-2 text-xs text-text-muted">
+                          {m.description}
+                        </div>
+                        <div className="mt-1 text-xs font-mono text-text-muted">
+                          {m.tag}
+                        </div>
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+
             {status && (
-              <div className="mb-4 rounded-xl border border-elevated bg-canvas px-4 py-4 text-left">
-                <div className="text-xs font-semibold uppercase tracking-wider text-text-muted">
-                  Default Model
-                </div>
-                <div className="mt-2 text-base font-semibold text-text">{status.model_tag}</div>
-                <div className="mt-1 text-sm text-text-muted">
-                  {model?.params ?? "4B effective"} &middot; {model?.size_gb ?? "9.6"} GB download
-                </div>
-                <div className="mt-1 text-xs text-text-muted">
-                  Recommended for the local cross-platform desktop runtime.
-                </div>
-                <div className="mt-3 text-xs text-text-muted">
-                  Runtime endpoint: <span className="font-mono">{status.endpoint}</span>
-                </div>
+              <div className="mb-4 rounded-lg border border-elevated bg-canvas px-3 py-2 text-xs text-text-muted">
+                Runtime endpoint: <span className="font-mono">{status.endpoint}</span>
                 {status.error && (
-                  <div className="mt-3 rounded-lg bg-fail/10 px-3 py-2 text-xs text-fail">
-                    {status.error}
-                  </div>
+                  <div className="mt-1 text-fail">{status.error}</div>
                 )}
               </div>
             )}
 
             <button
-              onClick={startDownload}
+              onClick={() => startDownload(activeTag)}
               className="w-full rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-primary/90"
             >
-              Download {status?.model_tag ?? "gemma4:e4b"} ({model?.size_gb ?? "9.6"} GB)
+              Download {activeTag} (
+              {offerings.find((m) => m.tag === activeTag)?.size_gb ?? "?"} GB)
             </button>
 
             <button
@@ -113,7 +178,8 @@ export function ModelSetup({ onReady, onConfigureProvider }: Props) {
             </button>
 
             <p className="mt-3 text-center text-xs text-text-muted">
-              Local setup needs a one-time model download.
+              Local setup needs a one-time model download. You can swap models
+              later from Model Settings.
             </p>
           </>
         )}
@@ -130,7 +196,7 @@ export function ModelSetup({ onReady, onConfigureProvider }: Props) {
               {progress?.downloaded_mb ?? 0} MB / {progress?.total_mb ?? "?"} MB ({pct}%)
             </p>
             <p className="text-center text-xs text-text-muted">
-              Pulling {status?.model_tag ?? "gemma4:e4b"} through the local Ollama runtime.
+              Pulling {downloadingTag ?? activeTag} through the local Ollama runtime.
             </p>
             {progress?.status && (
               <p className="text-center text-xs text-text-muted">{progress.status}</p>

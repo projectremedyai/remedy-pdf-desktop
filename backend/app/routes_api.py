@@ -38,11 +38,44 @@ from backend.app.remediation import create_job, get_job, get_progress_queue, run
 
 router = APIRouter(prefix="/api")
 
+# Metadata for the default model returned alongside model status. Values
+# match the gemma4:e4b multimodal vision model that ships as the default.
 LOCAL_MODEL = {
-    "size_gb": 3.4,
-    "params": "4.66B",
-    "ram_gb": 8,
+    "size_gb": 9.6,
+    "params": "4B effective",
+    "ram_gb": 16,
 }
+
+# Model offerings presented in the ModelSetup screen. Order matters — the
+# first entry with ``recommended`` true is the default selection. To add a
+# new option, append a dict here and let the frontend pick it up via
+# ``/api/model/status``; no Python wiring change required.
+LOCAL_MODELS_AVAILABLE = [
+    {
+        "tag": "gemma4:e4b",
+        "label": "Gemma 4 E4B",
+        "params": "4B effective",
+        "size_gb": 9.6,
+        "ram_gb": 16,
+        "recommended": True,
+        "description": (
+            "Recommended. Multimodal Gemma 4. Handles dense pages, complex "
+            "reading orders, and figure alt text."
+        ),
+    },
+    {
+        "tag": "gemma4:e2b",
+        "label": "Gemma 4 E2B",
+        "params": "2B effective",
+        "size_gb": 7.2,
+        "ram_gb": 12,
+        "recommended": False,
+        "description": (
+            "Smaller download, faster on lower-VRAM machines. May miss some "
+            "heading or alt-text details on scanned or graphics-heavy pages."
+        ),
+    },
+]
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".xlsx"}
@@ -344,6 +377,7 @@ async def model_status() -> dict:
         "model_tag": status.model_tag,
         "size_mb": round((status.size_bytes or 0) / 1e6, 1),
         "default_model": {"tag": settings.ollama_model_tag, **LOCAL_MODEL},
+        "available_models": LOCAL_MODELS_AVAILABLE,
         "error": status.error,
     }
 

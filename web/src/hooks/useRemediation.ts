@@ -66,6 +66,13 @@ export function useRemediation() {
 
       ws.onmessage = (evt) => {
         const event: ProgressEvent = JSON.parse(evt.data);
+
+        // Heartbeats keep the WebSocket idle watchdog quiet while a slow
+        // vision fix runs without firing a real progress callback. They
+        // are not user-visible state changes, so drop them before they
+        // reach the activity log.
+        if (event.type === "heartbeat") return;
+
         setProgress((prev) => [...prev, event]);
 
         if (event.type === "complete") {
