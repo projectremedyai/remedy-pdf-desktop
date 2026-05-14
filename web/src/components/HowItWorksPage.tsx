@@ -62,7 +62,7 @@ export function HowItWorksPage() {
             title="240+ Accessibility Fixes"
             cost="Mostly $0 — AI optional"
             color="text-primary"
-            description="Multi-tier escalation: deterministic fixes first (fast, free), then local model-assisted checks when the on-device runtime is available, then closed-loop repair strategies for the hardest cases."
+            description="Multi-tier escalation: deterministic fixes first (fast, free), then model-assisted checks when a vision provider is available, then closed-loop repair strategies for the hardest cases."
             details={[
               "Tier 1: 240+ deterministic structural repairs — tagging, headings, tables, lists, forms, language, bookmarks, font encoding, BDC/EMC balance",
               "Tier 2: Model-assisted escalation with vision (alt text, contrast, reading order verification)",
@@ -109,7 +109,7 @@ export function HowItWorksPage() {
           />
           <DiffCard
             title="Built-In AI Assistant"
-            description="Ask questions about your results in plain English. The agent queries actual report data with tool calling — no hallucination. Free models, no subscription."
+            description="Ask questions about your results in plain English. The agent queries actual report data with tool calling — no hallucination."
           />
           <DiffCard
             title="Open Source"
@@ -142,8 +142,8 @@ export function HowItWorksPage() {
         <SectionHeading>The AI Layer (Optional)</SectionHeading>
         <div className="rounded-xl border border-primary/20 bg-primary/5 p-6 space-y-3 text-sm text-text-muted leading-relaxed">
           <p>
-            The core engine works without any AI or cloud provider key. When the bundled
-            <strong className="text-text"> local Ollama runtime</strong> and downloaded model are available,
+            The core engine works without any AI or cloud provider key. When a
+            <strong className="text-text"> vision provider</strong> is available,
             additional vision-powered capabilities activate:
           </p>
           <ul className="space-y-2 ml-4">

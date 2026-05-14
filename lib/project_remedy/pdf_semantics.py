@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pikepdf
@@ -58,18 +59,26 @@ def _node_page_cache_key(node: pikepdf.Dictionary) -> tuple[str, object]:
     return ("id", id(resolved))
 
 
-def iter_resolved_kids(node: pikepdf.Dictionary) -> list:
-    """Return a node's resolved /K children."""
+def iter_resolved_kids(node: pikepdf.Dictionary) -> Iterator[object]:
+    """Yield a node's resolved /K children without materializing large arrays."""
     kids = node.get("/K")
     if kids is None:
-        return []
-    items = list(kids) if isinstance(kids, pikepdf.Array) else [kids]
-    return [resolve_pdf_object(item) for item in items]
+        return
+    if isinstance(kids, pikepdf.Array):
+        for idx in range(len(kids)):
+            yield resolve_pdf_object(kids[idx])
+    else:
+        yield resolve_pdf_object(kids)
 
 
 def node_has_struct_children(node: pikepdf.Dictionary) -> bool:
     """True when the node has at least one child structure element."""
-    for child in iter_resolved_kids(node):
+    kids = node.get("/K")
+    if kids is None:
+        return False
+    items = kids if isinstance(kids, pikepdf.Array) else [kids]
+    for item in items:
+        child = resolve_pdf_object(item)
         if isinstance(child, pikepdf.Dictionary) and "/S" in child:
             return True
     return False

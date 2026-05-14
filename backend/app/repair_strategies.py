@@ -16,8 +16,12 @@ from threading import Lock
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from backend.app import vision_settings as vision_settings_store
 from backend.app.config import settings
-from backend.app.ollama_runtime import build_local_vision_provider, local_ollama_model_ready
+from backend.app.ollama_runtime import (
+    build_local_vision_provider,
+    get_local_ollama_status,
+)
 
 
 def _ensure_monkeypatchable_compliance_report() -> None:
@@ -243,7 +247,6 @@ def _evaluate_acceptance(job: Any, pdf_path: Path):
         pdf_path,
         original_path=job.input_path,
         config=_load_manual_strategy_config(),
-        full_verification=getattr(job, "verification_mode", "sampled") == "full",
     )
 
 
@@ -515,7 +518,44 @@ def _is_loopback_url(url: str) -> bool:
 
 
 def _describe_math_strategy_runtime() -> tuple[bool, str]:
-    if local_ollama_model_ready():
+    current = vision_settings_store.load()
+
+    if current.provider == "local":
+        status = get_local_ollama_status(model_tag=current.local_model)
+        if status.reachable and status.installed:
+            return (
+                True,
+                "Math-related residuals were detected. Uses the selected local Ollama model to detect formulas and add /Formula tags with MathML when possible.",
+            )
+        return (
+            False,
+            "Math-related residuals were detected, but math formula tagging needs a vision model. The selected local Ollama model is not installed.",
+        )
+
+    if current.provider == "openrouter":
+        if current.openrouter_api_key:
+            return (
+                True,
+                "Math-related residuals were detected. Uses the configured OpenRouter model to detect formulas; page images are sent to OpenRouter over the network.",
+            )
+        return (
+            False,
+            "Math-related residuals were detected, but OpenRouter is selected without an API key.",
+        )
+
+    if current.provider == "ollama_cloud":
+        if current.ollama_cloud_api_key:
+            return (
+                True,
+                "Math-related residuals were detected. Uses the configured Ollama Cloud model to detect formulas; page images may be sent over the network.",
+            )
+        return (
+            False,
+            "Math-related residuals were detected, but Ollama Cloud is selected without an API key.",
+        )
+
+    status = get_local_ollama_status()
+    if status.reachable and status.installed:
         return (
             True,
             "Math-related residuals were detected. Uses the app's local Ollama model to detect formulas and add /Formula tags with MathML when possible.",
@@ -543,9 +583,29 @@ def _describe_math_strategy_runtime() -> tuple[bool, str]:
 
 
 def _build_math_vision_provider() -> Any | None:
-    provider = build_local_vision_provider()
-    if provider is not None:
-        return provider
+    current = vision_settings_store.load()
+
+    if current.provider == "local":
+        return build_local_vision_provider(model_tag=current.local_model)
+
+    if current.provider == "openrouter" and current.openrouter_api_key:
+        from project_remedy.pdf_vision import OpenRouterVisionProvider
+
+        return OpenRouterVisionProvider(
+            api_key=current.openrouter_api_key,
+            model=current.openrouter_model
+            or vision_settings_store.DEFAULT_OPENROUTER_MODEL,
+        )
+
+    if current.provider == "ollama_cloud" and current.ollama_cloud_api_key:
+        from project_remedy.pdf_vision import OllamaVisionProvider
+
+        return OllamaVisionProvider(
+            base_url="https://ollama.com/v1",
+            api_key=current.ollama_cloud_api_key,
+            model=current.ollama_cloud_model
+            or vision_settings_store.DEFAULT_OLLAMA_CLOUD_MODEL,
+        )
 
     from project_remedy.pdf_vision import create_provider_from_config
 

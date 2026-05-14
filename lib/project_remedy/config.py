@@ -53,8 +53,8 @@ class APIConfig:
     cluster_nodes: tuple[str, ...] = ()      # Additional Ollama node URLs
     vision_base_url: str = ""                # Dedicated LM Studio vision endpoint
     vision_cluster_nodes: tuple[str, ...] = ()  # Additional LM Studio node URLs
-    vision_model: str = "qwen3.5:4b"         # configurable vision model
-    text_model: str = "qwen3.5:4b"           # configurable text model
+    vision_model: str = "gemma4:e4b"         # configurable vision model
+    text_model: str = "gemma4:e4b"           # configurable text model (gemma4 handles both)
     max_concurrent_calls: int = 5
     max_retries: int = 3
     retry_backoff_base: float = 2.0
@@ -283,11 +283,11 @@ def load_config(
         ),
         vision_model=_env(
             "OLLAMA_VISION_MODEL",
-            api_yml.get("vision_model", "qwen3.5:4b"),
+            api_yml.get("vision_model", "gemma4:e4b"),
         ),
         text_model=_env(
             "OLLAMA_TEXT_MODEL",
-            api_yml.get("text_model", "qwen3.5:4b"),
+            api_yml.get("text_model", "gemma4:e4b"),
         ),
         max_concurrent_calls=_env_int(
             "MAX_CONCURRENT_API_CALLS",

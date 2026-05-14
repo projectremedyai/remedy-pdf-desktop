@@ -7,7 +7,7 @@ Remedy PDF Desktop is a local-first document accessibility remediation applicati
 **It is** an automated triage for the machine-testable subset of PDF/UA-1 and WCAG 2.1 AA:
 
 - Structure-tree repair (tags, headings, lists, tables, reading order)
-- Alt-text synthesis (OCR fallback + optional on-device vision)
+- Alt-text synthesis (OCR fallback + optional local or user-configured cloud vision)
 - Metadata + language + title normalization
 - Screen-reader simulation against NVDA/VoiceOver patterns
 - PDF/UA-1 validation via veraPDF
@@ -28,16 +28,16 @@ Do not claim WCAG, PDF/UA, Section 508, ADA Title II, or EAA compliance on the s
 - Upload formats: `.pdf`, `.docx`, `.pptx`, `.xlsx`
 - Outputs: a remediated document, an HTML report (`*_acr.html`), and a results summary in the UI
 - Review signals surfaced in the UI: fixes applied, remaining issues, WCAG mapping summary, screen-reader readability score, visual-diff/manual-review flags, and an experimental faithful rebuild action for completed PDF jobs
-- Processing model: remediation runs on the local machine. If the on-device vision model is not installed yet, the frontend offers a one-time download from Hugging Face and then uses that model locally.
+- Processing model: remediation runs on the local machine by default. Users can keep vision inference on the bundled local Ollama runtime or opt into Ollama Cloud or OpenRouter from Model Settings.
 
 ## Pipelines
 
 ### PDF documents
 
 1. `XY-Cut++` pre-pass for reading order
-2. `fix_and_verify()` remediation, with optional on-device vision assistance and escalation
+2. `fix_and_verify()` remediation, with optional local or user-configured cloud vision assistance and escalation
 3. `generate_document_report()` HTML report generation
-4. Best-effort post-remediation visual artifact check when the local vision model is available
+4. Best-effort post-remediation visual artifact check when the selected vision provider is available
 
 ### Office documents
 
@@ -65,7 +65,7 @@ cd web && npm install && cd ..
 cp .env.example .env
 ```
 
-`.env.example` contains optional local overrides. The app ships with no API keys required. The desktop workflow does not use Ollama Cloud. All LLM activity runs against a local Ollama runtime (default base URL `http://127.0.0.1:11500/v1`) with downloaded models.
+`.env.example` contains optional local overrides. The app ships with no API keys required and defaults to the local Ollama runtime (`http://127.0.0.1:11500/v1`). Users who want cloud inference can add provider keys in Model Settings; those settings are stored locally.
 
 ### Run The Web UI During Development
 
@@ -86,7 +86,7 @@ npm install
 npm run tauri:dev
 ```
 
-The Tauri shell starts the local backend and local Ollama runtime for the desktop app. On first launch, the frontend may ask you to download a local vision/text model (default `qwen3.5:4b`, ~3.4 GB). That download needs network access once; document processing after installation stays local to the machine running the app.
+The Tauri shell starts the local backend and local Ollama runtime for the desktop app. On first launch, the frontend may ask you to download a local vision/text model (default `gemma4:e4b`, ~9.6 GB). That download needs network access once; document processing after installation stays local unless the user selects a cloud provider.
 
 ### Verify
 

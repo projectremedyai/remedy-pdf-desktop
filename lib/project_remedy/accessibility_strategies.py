@@ -15,7 +15,7 @@ All strategies share a common async interface::
     async def apply(
         self,
         soup: BeautifulSoup,
-        llm_client,       # LLM client
+        llm_client,       # Ollama-compatible client
         **context,
     ) -> BeautifulSoup
 
@@ -303,7 +303,7 @@ class BaseRemediationStrategy:
         soup:
             The parsed HTML document.
         llm_client:
-            An LLM client instance with ``chat()``
+            An Ollama-compatible client instance with ``chat()``
             and ``vision()`` methods.
         **context:
             Extra context (e.g. ``image_dir``, ``document_title``).
@@ -1769,7 +1769,7 @@ class RemediationStrategyRunner:
         html:
             Raw HTML string.
         llm_client:
-            An LLM client instance.
+            An Ollama-compatible client instance.
         **context:
             Extra context forwarded to each strategy (e.g. ``image_dir``).
 

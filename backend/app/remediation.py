@@ -19,10 +19,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from backend.app import vision_settings as vision_settings_store
 from backend.app.config import settings
 from backend.app.ollama_runtime import build_local_vision_provider
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_vision_settings_env() -> None:
+    """Seed vision timeout env before project_remedy.pdf_fixer is imported."""
+    try:
+        current = vision_settings_store.load()
+        os.environ["PDF_FIXER_VISION_PAGE_TIMEOUT"] = str(
+            current.page_timeout_seconds
+        )
+    except Exception:
+        logger.exception("Could not apply vision settings to environment")
+
+
+_apply_vision_settings_env()
 
 
 # Override the bundled library's batch-tuned manual-review threshold to match
@@ -424,7 +439,7 @@ async def _vision_artifact_check(
     if not page_indices:
         return None
 
-    page_timeout = float(os.getenv("PDF_FIXER_VISION_PAGE_TIMEOUT", "30"))
+    page_timeout = float(os.getenv("PDF_FIXER_VISION_PAGE_TIMEOUT", "90"))
 
     try:
         from project_remedy.pdf_vision import render_page_to_image
@@ -486,24 +501,66 @@ async def _vision_artifact_check(
 
 
 def _build_vision_provider():
-    """Return the local Ollama vision provider when the runtime is ready.
+    """Return the user-selected vision provider.
 
-    Waits up to ``vision_ready_wait_seconds`` for Ollama to boot before
-    giving up. Without the wait, vision calls at the start of the pipeline
-    race Ollama's startup and get falsely recorded as accessibility failures
-    ("Vision analysis error: All connection attempts failed").
+    Local Ollama still waits for the bundled runtime to boot. Cloud providers
+    are built from locally persisted settings and only receive page images
+    when the user selected that provider.
     """
+    current = vision_settings_store.load()
+    os.environ["PDF_FIXER_VISION_PAGE_TIMEOUT"] = str(current.page_timeout_seconds)
+
+    if current.provider == "openrouter":
+        if not current.openrouter_api_key:
+            logger.warning("OpenRouter vision selected but no API key is configured")
+            return None
+        try:
+            from project_remedy.pdf_vision import OpenRouterVisionProvider
+
+            logger.info("Vision provider: OpenRouter (%s)", current.openrouter_model)
+            return OpenRouterVisionProvider(
+                api_key=current.openrouter_api_key,
+                model=(
+                    current.openrouter_model
+                    or vision_settings_store.DEFAULT_OPENROUTER_MODEL
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to build OpenRouter vision provider; vision disabled")
+            return None
+
+    if current.provider == "ollama_cloud":
+        if not current.ollama_cloud_api_key:
+            logger.warning("Ollama Cloud selected but no API key is configured")
+            return None
+        try:
+            from project_remedy.pdf_vision import OllamaVisionProvider
+
+            logger.info("Vision provider: Ollama Cloud (%s)", current.ollama_cloud_model)
+            return OllamaVisionProvider(
+                base_url="https://ollama.com/v1",
+                api_key=current.ollama_cloud_api_key,
+                model=(
+                    current.ollama_cloud_model
+                    or vision_settings_store.DEFAULT_OLLAMA_CLOUD_MODEL
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to build Ollama Cloud vision provider; vision disabled")
+            return None
+
     try:
         provider = build_local_vision_provider(
             wait_seconds=float(settings.vision_ready_wait_seconds),
+            model_tag=current.local_model,
         )
         if provider is None:
             logger.info(
                 "Local Ollama model %s is not ready; using OCR/placeholder fallbacks",
-                settings.ollama_model_tag,
+                current.local_model,
             )
             return None
-        logger.info("Vision provider: Ollama (%s)", settings.ollama_model_tag)
+        logger.info("Vision provider: local Ollama (%s)", current.local_model)
         return provider
     except Exception:
         logger.exception("Failed to build local Ollama vision provider; vision disabled")
@@ -855,7 +912,6 @@ async def run_remediation(job_id: str) -> None:
             output_pdf,
             original_path=job.input_path,
             config=pipeline_config,
-            full_verification=full_verification,
         )
 
         if _reading_order_needs_targeted_retry(acceptance) and vision_provider is not None:
@@ -885,7 +941,6 @@ async def run_remediation(job_id: str) -> None:
                     retry_pdf,
                     original_path=job.input_path,
                     config=pipeline_config,
-                    full_verification=True,
                 )
                 if (
                     retry_pdf.exists()

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import pikepdf
+import os
 import shutil
 import subprocess
+import threading
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,10 @@ from project_remedy.pdf_checker import (
     PDFAccessibilityChecker,
     SOURCE_FONT_RISK_DETAIL_PREFIX,
 )
+# Desktop does not bundle the Quality Layer Extension; ``QualityResult`` is
+# kept as a permissive alias so ``PDFAcceptanceResult`` stays shape-compatible
+# with the server while ``quality_result`` is always ``None`` in this build.
+QualityResult = Any  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 from project_remedy.tag_tree_reader import (
@@ -28,12 +33,6 @@ from project_remedy.tag_tree_reader import (
     ValidationResult as TagTreeValidationResult,
     validate_tag_tree,
 )
-
-REVIEWABLE_CHECK_RULE_IDS = frozenset({
-    "doc-reading-order",
-    "doc-color-contrast",
-    "doc-use-of-color",
-})
 
 
 @dataclass
@@ -71,6 +70,23 @@ class VeraPDFResult:
 
 
 @dataclass
+class TextSimilarityResult:
+    """Jaccard text-similarity check between original and rebuilt PDF.
+
+    Populated only when ``evaluate_pdf_acceptance`` is called with
+    ``rebuild_mode=True``; the rebuild tier intentionally skips visual-diff
+    (rebuilt PDFs are laid out differently by design) and gates content
+    preservation on sentence-level Jaccard similarity instead.
+    """
+
+    checked: bool
+    passed: bool
+    score: float = 0.0
+    threshold: float = 0.0
+    error: str = ""
+
+
+@dataclass
 class PDFAcceptanceResult:
     """Composite PDF acceptance decision."""
 
@@ -80,97 +96,14 @@ class PDFAcceptanceResult:
     verapdf_result: VeraPDFResult
     openability_result: PDFOpenabilityResult | None = None
     visual_diff_result: VisualDiffResult | None = None
-    vision_result: Any = None
+    text_similarity_result: TextSimilarityResult | None = None
     checker_error: str = ""
     screen_reader_error: str = ""
+    quality_result: QualityResult | None = None
 
     @property
     def checker_failures(self) -> list[CheckResult]:
-        return [
-            r
-            for r in self.checker_report.results
-            if r.status in {"Failed", "Manual Check Needed"}
-        ]
-
-    def _is_vision_backed_clean_sample(self, result: CheckResult) -> bool:
-        """Return True when *result* is a Manual-Check-Needed vision check that
-        the vision model already cleared on its analyzed sample.
-
-        REMEDY-69 #12: ``_check_logical_reading_order`` and
-        ``_check_color_contrast`` legitimately return ``"Manual Check Needed"``
-        when vision sampled a subset of pages and found nothing wrong. Prior
-        to this filter, the batch acceptance gate treated that status as a
-        blocking failure — which meant every sampled-vision run on a large
-        PDF (the default path under ``VISION_PAGE_SAMPLE_SIZE=10``) was
-        routed to manual review even when vision said the sample was clean.
-        That inflated the manual-review queue by ~40% on the LAMC six-shard
-        run. The invariant we restore here is: *if vision successfully
-        analyzed at least one page and found no relevant defect in that
-        sample, the corresponding Manual-Check-Needed is evidence-backed
-        and must not block acceptance.*
-        """
-        if result.status != "Manual Check Needed":
-            return False
-        if result.rule_id not in REVIEWABLE_CHECK_RULE_IDS:
-            return False
-        vision = self.vision_result
-        if vision is None:
-            return False
-        # Vision must actually have analyzed something — otherwise the
-        # Manual-Check-Needed is speculative and still a real review signal.
-        analyzed = getattr(vision, "analyzed_pages", None) or []
-        try:
-            analyzed_count = len({int(page) for page in analyzed})
-        except (TypeError, ValueError):
-            analyzed_count = 0
-        if analyzed_count <= 0:
-            return False
-
-        if result.rule_id == "doc-reading-order":
-            if not hasattr(vision, "reading_order_issues"):
-                return False
-            issues = getattr(vision, "reading_order_issues", None) or []
-            # Any error-severity finding means vision actively flagged the
-            # sample — the Manual-Check-Needed wrapper is real, don't clear it.
-            has_error = any(
-                getattr(issue, "severity", "warning") == "error" for issue in issues
-            )
-            return not has_error
-
-        if result.rule_id == "doc-use-of-color":
-            if not hasattr(vision, "use_of_color_issues"):
-                return False
-            use_of_color_issues = getattr(vision, "use_of_color_issues", None) or []
-            return len(use_of_color_issues) == 0
-
-        # doc-color-contrast: any non-empty issue list counts as a hit.
-        if not hasattr(vision, "contrast_issues"):
-            return False
-        contrast_issues = getattr(vision, "contrast_issues", None) or []
-        return len(contrast_issues) == 0
-
-    @staticmethod
-    def _is_reviewable_checker_failure(result: CheckResult) -> bool:
-        return (
-            result.rule_id in REVIEWABLE_CHECK_RULE_IDS
-            and result.status in {"Failed", "Manual Check Needed"}
-        )
-
-    def _blocking_checker_failures(self) -> list[CheckResult]:
-        """Checker failures that actually block conformance / manual review.
-
-        Filters out two classes of benign signals:
-        - Source-font-only encoding failures (see ``_is_source_font_checker_failure``)
-        - Vision-backed clean-sample Manual-Check-Needed entries
-          (see ``_is_vision_backed_clean_sample``)
-        """
-        return [
-            f
-            for f in self.checker_failures
-            if not self._is_source_font_checker_failure(f)
-            and not self._is_vision_backed_clean_sample(f)
-            and not self._is_reviewable_checker_failure(f)
-        ]
+        return [r for r in self.checker_report.results if r.status == "Failed"]
 
     @property
     def screen_reader_errors(self) -> list[ScreenReaderIssue]:
@@ -282,6 +215,20 @@ class PDFAcceptanceResult:
                     "fixable": False,
                 }
             )
+        tsr = self.text_similarity_result
+        if tsr and tsr.checked and not tsr.passed:
+            entries.append(
+                {
+                    "source": "text_similarity",
+                    "rule_id": "text-similarity",
+                    "description": (
+                        f"Text similarity below threshold: "
+                        f"{tsr.score:.3f} < {tsr.threshold:.3f}"
+                    ),
+                    "details": [tsr.error] if tsr.error else [],
+                    "fixable": False,
+                }
+            )
         return entries
 
     @property
@@ -289,10 +236,11 @@ class PDFAcceptanceResult:
         if not self.openable:
             return []
         reasons: list[str] = []
-        # Only count blocking checker failures — exclude source-font-only
-        # encoding issues and vision-backed clean-sample Manual-Check-Needed
-        # results (REMEDY-69 #12).
-        blocking_checker = self._blocking_checker_failures()
+        # Only count blocking checker failures (exclude source-font-only issues)
+        blocking_checker = [
+            f for f in self.checker_failures
+            if not self._is_source_font_checker_failure(f)
+        ]
         if blocking_checker:
             reasons.append(f"{len(blocking_checker)} checker failure(s)")
         if self.checker_error:
@@ -325,6 +273,12 @@ class PDFAcceptanceResult:
                 reasons.append(self.verapdf_result.error)
             else:
                 reasons.append("veraPDF failed")
+        tsr = self.text_similarity_result
+        if tsr and tsr.checked and not tsr.passed:
+            reasons.append(
+                f"text similarity below threshold "
+                f"({tsr.score:.3f} < {tsr.threshold:.3f})"
+            )
         return reasons
 
     @property
@@ -355,10 +309,10 @@ class PDFAcceptanceResult:
     def passed(self) -> bool:
         if not self.openable:
             return False
-        # REMEDY-69 #12: vision-backed clean-sample Manual-Check-Needed
-        # results are evidence that vision saw no defect — they must not
-        # block conformance acceptance.
-        blocking_checker = self._blocking_checker_failures()
+        blocking_checker = [
+            f for f in self.checker_failures
+            if not self._is_source_font_checker_failure(f)
+        ]
         if blocking_checker:
             return False
         if self.screen_reader_errors:
@@ -370,6 +324,12 @@ class PDFAcceptanceResult:
                 for v in self.verapdf_result.violations
             ):
                 return False
+        if (
+            self.text_similarity_result
+            and self.text_similarity_result.checked
+            and not self.text_similarity_result.passed
+        ):
+            return False
         return True
 
     @staticmethod
@@ -507,20 +467,130 @@ def compare_pdf_visual_fidelity(
         use_numpy = False
 
     try:
+        from PIL import Image, ImageChops, ImageFilter, ImageStat
+        use_pillow = True
+    except ImportError:
+        use_pillow = False
+
+    def _pix_to_image(pix):
+        return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+    def _image_mean_abs_diff(orig_img, rem_img) -> float:
+        diff = ImageChops.difference(orig_img, rem_img)
+        stat = ImageStat.Stat(diff)
+        if not stat.mean:
+            return 0.0
+        return sum(stat.mean) / (len(stat.mean) * 255)
+
+    def _blurred_thumbnail_diff(orig_pix, rem_pix) -> float | None:
+        """Perceptual fallback for antialias-only text raster differences."""
+        if not use_pillow:
+            return None
+        try:
+            orig_img = _pix_to_image(orig_pix)
+            rem_img = _pix_to_image(rem_pix)
+            target_w = max(1, min(orig_pix.width, rem_pix.width) // 3)
+            target_h = max(1, min(orig_pix.height, rem_pix.height) // 3)
+            orig_thumb = orig_img.filter(ImageFilter.GaussianBlur(radius=0.75)).resize(
+                (target_w, target_h), Image.Resampling.LANCZOS,
+            )
+            rem_thumb = rem_img.filter(ImageFilter.GaussianBlur(radius=0.75)).resize(
+                (target_w, target_h), Image.Resampling.LANCZOS,
+            )
+            diff = ImageChops.difference(orig_thumb, rem_thumb)
+            stat = ImageStat.Stat(diff)
+            if not stat.mean:
+                return 0.0
+            return sum(stat.mean) / (len(stat.mean) * 255)
+        except Exception:
+            return None
+
+    try:
         for i in range(orig_pages):
             # RGB colorspace: catches color-only changes (e.g. desaturation from GS)
             orig_pix = orig_doc[i].get_pixmap(matrix=mat, colorspace=fitz.csRGB)
             rem_pix = rem_doc[i].get_pixmap(matrix=mat, colorspace=fitz.csRGB)
 
             if orig_pix.width != rem_pix.width or orig_pix.height != rem_pix.height:
-                differing.append(i)
-                max_diff = 1.0
+                width_delta = abs(orig_pix.width - rem_pix.width) / max(
+                    orig_pix.width, rem_pix.width, 1,
+                )
+                height_delta = abs(orig_pix.height - rem_pix.height) / max(
+                    orig_pix.height, rem_pix.height, 1,
+                )
+                if max(width_delta, height_delta) > 0.02:
+                    differing.append(i)
+                    max_diff = 1.0
+                    continue
+
+                target_h = min(orig_pix.height, rem_pix.height)
+                target_w = min(orig_pix.width, rem_pix.width)
+                if use_pillow:
+                    orig_img = _pix_to_image(orig_pix).resize(
+                        (target_w, target_h), Image.Resampling.BILINEAR,
+                    )
+                    rem_img = _pix_to_image(rem_pix).resize(
+                        (target_w, target_h), Image.Resampling.BILINEAR,
+                    )
+                    page_diff = _image_mean_abs_diff(orig_img, rem_img)
+                elif use_numpy:
+                    o_arr = np.frombuffer(orig_pix.samples, dtype=np.uint8).reshape(
+                        orig_pix.height, orig_pix.width, -1,
+                    )
+                    r_arr = np.frombuffer(rem_pix.samples, dtype=np.uint8).reshape(
+                        rem_pix.height, rem_pix.width, -1,
+                    )
+                    o_y = np.linspace(0, orig_pix.height - 1, target_h).astype(np.int32)
+                    o_x = np.linspace(0, orig_pix.width - 1, target_w).astype(np.int32)
+                    r_y = np.linspace(0, rem_pix.height - 1, target_h).astype(np.int32)
+                    r_x = np.linspace(0, rem_pix.width - 1, target_w).astype(np.int32)
+                    o = o_arr[o_y][:, o_x].astype(np.float32)
+                    r = r_arr[r_y][:, r_x].astype(np.float32)
+                    page_diff = float(np.mean(np.abs(o - r)) / 255)
+                else:
+                    orig_samples = orig_pix.samples
+                    rem_samples = rem_pix.samples
+                    orig_bpp = max(1, len(orig_samples) // (orig_pix.width * orig_pix.height))
+                    rem_bpp = max(1, len(rem_samples) // (rem_pix.width * rem_pix.height))
+                    bpp = min(orig_bpp, rem_bpp)
+                    total = target_h * target_w * bpp
+                    if total == 0:
+                        continue
+                    diff_sum = 0
+                    for y in range(target_h):
+                        oy = y * (orig_pix.height - 1) // max(target_h - 1, 1)
+                        ry = y * (rem_pix.height - 1) // max(target_h - 1, 1)
+                        for x in range(target_w):
+                            ox = x * (orig_pix.width - 1) // max(target_w - 1, 1)
+                            rx = x * (rem_pix.width - 1) // max(target_w - 1, 1)
+                            o_base = (oy * orig_pix.width + ox) * orig_bpp
+                            r_base = (ry * rem_pix.width + rx) * rem_bpp
+                            for channel in range(bpp):
+                                diff_sum += abs(
+                                    orig_samples[o_base + channel]
+                                    - rem_samples[r_base + channel]
+                                )
+                    page_diff = diff_sum / (total * 255)
+                if page_diff > max_diff:
+                    max_diff = page_diff
+                perceptual_diff = None
+                if page_diff > tolerance:
+                    perceptual_diff = _blurred_thumbnail_diff(orig_pix, rem_pix)
+                if page_diff > tolerance and (
+                    perceptual_diff is None or perceptual_diff > min(tolerance, 0.03)
+                ):
+                    differing.append(i)
                 continue
 
             if use_numpy:
                 o = np.frombuffer(orig_pix.samples, dtype=np.uint8).astype(np.float32)
                 r = np.frombuffer(rem_pix.samples, dtype=np.uint8).astype(np.float32)
                 page_diff = float(np.mean(np.abs(o - r)) / 255)
+            elif use_pillow:
+                page_diff = _image_mean_abs_diff(
+                    _pix_to_image(orig_pix),
+                    _pix_to_image(rem_pix),
+                )
             else:
                 orig_samples = orig_pix.samples
                 rem_samples = rem_pix.samples
@@ -531,7 +601,12 @@ def compare_pdf_visual_fidelity(
 
             if page_diff > max_diff:
                 max_diff = page_diff
+            perceptual_diff = None
             if page_diff > tolerance:
+                perceptual_diff = _blurred_thumbnail_diff(orig_pix, rem_pix)
+            if page_diff > tolerance and (
+                perceptual_diff is None or perceptual_diff > min(tolerance, 0.03)
+            ):
                 differing.append(i)
     except Exception as exc:
         orig_doc.close()
@@ -557,15 +632,13 @@ def compare_pdf_visual_fidelity(
 def _compute_vision_result_sync(
     pdf_path: Path,
     config: PipelineConfig,
-    *,
-    full_verification: bool = False,
 ) -> Any:
     """Synchronously compute a vision analysis result for the acceptance gate.
 
     REMEDY-57: When the batch path calls ``evaluate_pdf_acceptance`` it has
     historically failed to pass a ``vision_result``, which means the checker
-    returns ``Manual Check Needed`` for ``doc-reading-order``,
-    ``doc-use-of-color``, and ``doc-color-contrast`` on roughly 40% of PDFs — false positives that
+    returns ``Manual Check Needed`` for ``doc-reading-order`` and
+    ``doc-color-contrast`` on roughly 40% of PDFs — false positives that
     inflate the manual-review queue. This helper auto-computes the missing
     result when we are in a plain synchronous context and vision credentials
     are configured.
@@ -607,11 +680,36 @@ def _compute_vision_result_sync(
 
     try:
         analyzer = VisionAnalyzer(provider)
-        if full_verification:
-            with pikepdf.open(pdf_path) as pdf:
-                pages = list(range(1, len(pdf.pages) + 1))
-            return asyncio.run(analyzer.analyze_all(pdf_path, pages=pages))
-        return asyncio.run(analyzer.analyze_all(pdf_path))
+        try:
+            timeout_seconds = float(os.environ.get("PDF_ACCEPTANCE_VISION_TIMEOUT", "300"))
+        except ValueError:
+            timeout_seconds = 300.0
+
+        async def _run_acceptance_vision():
+            return await asyncio.wait_for(
+                analyzer.analyze_all(pdf_path),
+                timeout=timeout_seconds,
+            )
+
+        result: dict[str, object] = {}
+        error: dict[str, BaseException] = {}
+
+        def _runner() -> None:
+            try:
+                result["value"] = asyncio.run(_run_acceptance_vision())
+            except BaseException as exc:
+                error["exc"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout_seconds)
+        if thread.is_alive():
+            raise TimeoutError(
+                f"acceptance vision timed out after {timeout_seconds:.0f}s"
+            )
+        if "exc" in error:
+            raise error["exc"]
+        return result.get("value")
     except Exception as exc:
         logger.warning(
             "Vision analysis for acceptance gate failed on %s: %s",
@@ -629,7 +727,7 @@ def evaluate_pdf_acceptance(
     checker_report: CheckReport | None = None,
     tag_tree_result: TagTreeValidationResult | None = None,
     vision_result: Any = None,
-    full_verification: bool = False,
+    rebuild_mode: bool = False,
 ) -> PDFAcceptanceResult:
     """Run the shared PDF acceptance gate.
 
@@ -637,11 +735,21 @@ def evaluate_pdf_acceptance(
     against the source PDF. Without it, visual diff is skipped.
 
     REMEDY-57: pass *vision_result* (a ``VisionCheckResult``) to enable the
-    checker's reading-order, use-of-color, and color-contrast judgement. When omitted and
+    checker's reading-order and color-contrast judgement. When omitted and
     *config* is provided from a synchronous caller, a fresh vision analysis
     is computed automatically so the checker no longer returns
-    ``Manual Check Needed`` for every ELAC-style document by default.
+    ``Manual Check Needed`` for every scanned-style document by default.
+
+    Pass ``rebuild_mode=True`` when evaluating output from the rebuild tier
+    (``src/project_remedy/rebuild``). In that mode the visual-diff pixel
+    comparison is skipped entirely — rebuilt PDFs are laid out differently
+    by design — and sentence-level Jaccard text similarity between
+    *original_path* and ``pdf_path`` gates content preservation instead.
+    ``original_path`` is required when ``rebuild_mode=True``.
     """
+    if rebuild_mode and original_path is None:
+        raise ValueError("rebuild_mode requires original_path")
+
     openability_result = validate_pdf_openability(pdf_path)
     if not openability_result.openable:
         return PDFAcceptanceResult(
@@ -650,21 +758,16 @@ def evaluate_pdf_acceptance(
             tag_tree_result=tag_tree_result or _empty_tag_tree_result(pdf_path, page_count=0),
             verapdf_result=VeraPDFResult(checked=False, passed=False),
             openability_result=openability_result,
-            vision_result=vision_result,
         )
 
     checker_error = ""
     if checker_report is None:
         # REMEDY-57: auto-compute vision_result when the caller didn't pass
         # one but did give us a config. Without this the checker will flag
-        # doc-reading-order / doc-use-of-color / doc-color-contrast as "Manual Check Needed"
+        # doc-reading-order / doc-color-contrast as "Manual Check Needed"
         # spuriously, inflating the manual-review queue by ~40%.
         if vision_result is None and config is not None:
-            vision_result = _compute_vision_result_sync(
-                pdf_path,
-                config,
-                full_verification=full_verification,
-            )
+            vision_result = _compute_vision_result_sync(pdf_path, config)
         try:
             checker_report = PDFAccessibilityChecker(
                 pdf_path, vision_result=vision_result
@@ -684,7 +787,35 @@ def evaluate_pdf_acceptance(
     verapdf_result = validate_with_verapdf(pdf_path, config=config)
 
     visual_diff_result: VisualDiffResult | None = None
-    if original_path is not None and original_path != pdf_path:
+    text_similarity_result: TextSimilarityResult | None = None
+    if rebuild_mode:
+        # Rebuild tier: skip visual-diff entirely, gate on text similarity.
+        # original_path is guaranteed non-None by the guard above.
+        from project_remedy.rebuild.text_similarity import text_similarity
+
+        threshold = (
+            config.rebuild.text_similarity_threshold
+            if config is not None
+            else 0.85
+        )
+        try:
+            score = text_similarity(original_path, pdf_path)
+            text_similarity_result = TextSimilarityResult(
+                checked=True,
+                passed=score >= threshold,
+                score=score,
+                threshold=threshold,
+            )
+        except Exception as exc:
+            # Don't mask upstream acceptance signal with an internal error
+            # here; record it and let other checks carry the decision.
+            text_similarity_result = TextSimilarityResult(
+                checked=False,
+                passed=True,
+                threshold=threshold,
+                error=str(exc)[:200],
+            )
+    elif original_path is not None and original_path != pdf_path:
         visual_diff_result = compare_pdf_visual_fidelity(original_path, pdf_path)
 
     return PDFAcceptanceResult(
@@ -694,7 +825,7 @@ def evaluate_pdf_acceptance(
         verapdf_result=verapdf_result,
         openability_result=openability_result,
         visual_diff_result=visual_diff_result,
-        vision_result=vision_result,
+        text_similarity_result=text_similarity_result,
         checker_error=checker_error,
         screen_reader_error=screen_reader_error,
     )

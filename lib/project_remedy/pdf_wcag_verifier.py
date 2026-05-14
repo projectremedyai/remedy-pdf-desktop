@@ -236,6 +236,7 @@ def _extract_page_structure_context(pdf_path: Path, page_index: int) -> tuple[st
     try:
         import pikepdf
         import re
+        from project_remedy.pdf_checker import _resolve_pdf_object
 
         pdf = pikepdf.open(pdf_path)
         total_pages = len(pdf.pages)
@@ -256,7 +257,7 @@ def _extract_page_structure_context(pdf_path: Path, page_index: int) -> tuple[st
                 node_page = -1
                 if pg is not None:
                     try:
-                        resolved = pg if not hasattr(pg, "resolve") else pg.resolve()
+                        resolved = _resolve_pdf_object(pg)
                         for i, p in enumerate(pdf.pages):
                             if p.obj == resolved:
                                 node_page = i
@@ -661,7 +662,7 @@ class WCAGVisionVerifier:
                 criteria["color_contrast"] = CriterionResult(
                     applicable=True,
                     status="pass",
-                    wcag_sc=["1.4.3"],
+                    wcag_sc=["1.4.3", "1.4.1"],
                     confidence=0.5,
                     summary="Contrast verification — pending implementation",
                 )

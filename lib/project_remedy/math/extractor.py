@@ -116,7 +116,11 @@ def extract_formulas(
         try:
             tmp_img = render_page(pdf_path, page_num)
 
-            response = asyncio.get_event_loop().run_until_complete(
+            # Worker threads (asyncio.to_thread, the PDF job worker) have no
+            # default event loop, so ``get_event_loop()`` fails on Python 3.12+.
+            # ``asyncio.run`` creates and tears down a fresh loop per call,
+            # which is safe regardless of caller context.
+            response = asyncio.run(
                 vision_provider.analyze_image(tmp_img, MATH_DETECTION_PROMPT)
             )
 

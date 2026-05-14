@@ -245,11 +245,77 @@ export interface DownloadProgress {
   digest?: string;
 }
 
+export interface LocalModelEntry {
+  name: string;
+  size_mb: number;
+  parameter_size: string;
+  family: string;
+}
+
+export interface LocalModelList {
+  reachable: boolean;
+  models: LocalModelEntry[];
+  error?: string;
+}
+
+export async function listLocalModels(): Promise<LocalModelList> {
+  const res = await apiFetch(`${BASE}/model/list`);
+  if (!res.ok) throw new Error("Failed to list local models");
+  return res.json();
+}
+
+export type VisionProvider = "local" | "ollama_cloud" | "openrouter";
+
+export interface VisionSettings {
+  provider: VisionProvider;
+  local_model: string;
+  openrouter_model: string;
+  ollama_cloud_model: string;
+  openrouter_api_key: string;
+  openrouter_api_key_set: boolean;
+  ollama_cloud_api_key: string;
+  ollama_cloud_api_key_set: boolean;
+  page_timeout_seconds: number;
+}
+
+export async function getVisionSettings(): Promise<VisionSettings> {
+  const res = await apiFetch(`${BASE}/settings/vision`);
+  if (!res.ok) throw new Error("Failed to load vision settings");
+  return res.json();
+}
+
+export async function putVisionSettings(
+  patch: Partial<{
+    provider: VisionProvider;
+    local_model: string;
+    openrouter_model: string;
+    ollama_cloud_model: string;
+    openrouter_api_key: string;
+    ollama_cloud_api_key: string;
+    page_timeout_seconds: number;
+  }>,
+): Promise<VisionSettings> {
+  const res = await apiFetch(`${BASE}/settings/vision`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || res.statusText);
+  }
+  return res.json();
+}
+
 export function streamModelDownload(
   onProgress: (p: DownloadProgress) => void,
+  modelName?: string,
 ): AbortController {
   const controller = new AbortController();
-  apiFetch(`${BASE}/model/download`, {
+  const url = modelName
+    ? `${BASE}/model/download?model=${encodeURIComponent(modelName)}`
+    : `${BASE}/model/download`;
+  apiFetch(url, {
     method: "POST",
     signal: controller.signal,
   }).then(async (res) => {

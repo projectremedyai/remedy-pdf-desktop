@@ -66,12 +66,50 @@ def test_model_status_reports_local_runtime(monkeypatch, tmp_path: Path) -> None
     assert payload["default_model"]["tag"] == "qwen3.5:4b"
 
 
+def test_vision_settings_round_trip_masks_keys(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(settings, "app_api_key", "")
+    monkeypatch.setattr(settings, "output_dir", tmp_path / "output")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+
+    with TestClient(app) as client:
+        update = client.put(
+            "/api/settings/vision",
+            json={
+                "provider": "openrouter",
+                "openrouter_model": "openai/gpt-4o-mini",
+                "openrouter_api_key": "sk-or-v1-test-123456",
+                "page_timeout_seconds": 120,
+            },
+        )
+        read_back = client.get("/api/settings/vision")
+
+    assert update.status_code == 200
+    payload = update.json()
+    assert payload["provider"] == "openrouter"
+    assert payload["openrouter_model"] == "openai/gpt-4o-mini"
+    assert payload["openrouter_api_key_set"] is True
+    assert payload["openrouter_api_key"] == "********3456"
+    assert payload["page_timeout_seconds"] == 120
+    assert read_back.json()["openrouter_api_key"] == "********3456"
+
+
 def test_upload_name_is_confined_to_safe_basename() -> None:
     assert _safe_upload_name(r"..\..\weird report?.pdf") == "weird_report_.pdf"
     assert _safe_upload_name("\x00../../") == "upload"
 
 
-def test_removed_ai_provider_strings_stay_absent() -> None:
+def test_removed_provider_classes_stay_absent() -> None:
+    """Guard against accidental re-introduction of the OpenAI and Anthropic
+    vision provider classes that were removed in favour of OpenRouter.
+
+    Incidental mentions of "openai/..." or "anthropic/..." model slugs are
+    allowed because those are valid OpenRouter routing identifiers (e.g.
+    ``openai/gpt-4o-mini``, ``anthropic/claude-3-5-sonnet``). The earlier
+    Gemini scrub was deliberately retired when the project switched to
+    OpenRouter — OpenRouter can route to Gemini models too, so the name now
+    appears in docs as one of several routing examples.
+    """
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -97,7 +135,10 @@ def test_removed_ai_provider_strings_stay_absent() -> None:
         ".yml",
     }
     text_names = {"Dockerfile", ".gitignore"}
-    forbidden_terms = ("ge" + "mini", "ge" + "nai")
+    self_path = Path(__file__).resolve()
+    # Match class identifiers as whole words so substrings (e.g. inside
+    # docstrings describing OpenRouter slugs) don't trip the scrub.
+    forbidden_classes = ("OpenAIVisionProvider", "AnthropicVisionProvider")
 
     matches: list[str] = []
     for raw_name in result.stdout.decode("utf-8").split("\0"):
@@ -106,8 +147,10 @@ def test_removed_ai_provider_strings_stay_absent() -> None:
         path = root / raw_name
         if path.suffix.lower() not in text_suffixes and path.name not in text_names:
             continue
-        content = path.read_text(encoding="utf-8", errors="ignore").lower()
-        for term in forbidden_terms:
+        if path.resolve() == self_path:
+            continue  # don't scan this test file itself
+        content = path.read_text(encoding="utf-8", errors="ignore")
+        for term in forbidden_classes:
             if term in content:
                 matches.append(f"{raw_name}: {term}")
 

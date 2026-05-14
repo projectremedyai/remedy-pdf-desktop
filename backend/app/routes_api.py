@@ -21,7 +21,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.app.config import settings
-from backend.app.ollama_runtime import get_local_ollama_status, stream_model_pull_events
+from backend.app import vision_settings as vision_settings_store
+from backend.app.ollama_runtime import (
+    get_local_ollama_status,
+    ollama_native_base_url,
+    stream_model_pull_events,
+)
 from backend.app.repair_strategies import (
     describe_strategy_picker,
     get_current_strategy_output_path,
@@ -344,8 +349,10 @@ async def model_status() -> dict:
 
 
 @router.post("/model/download")
-async def model_download() -> StreamingResponse:
-    """Pull the default local model through the local Ollama daemon."""
+async def model_download(model: str | None = None) -> StreamingResponse:
+    """Pull a local model through the local Ollama daemon."""
+    target = (model or "").strip() or None
+
     async def _stream():
         status = await asyncio.to_thread(get_local_ollama_status)
         if not status.reachable:
@@ -353,7 +360,7 @@ async def model_download() -> StreamingResponse:
             return
 
         try:
-            async for msg in stream_model_pull_events():
+            async for msg in stream_model_pull_events(target):
                 yield f"data: {json.dumps(msg)}\n\n"
                 if msg.get("done") or msg.get("error"):
                     return
@@ -361,3 +368,80 @@ async def model_download() -> StreamingResponse:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+@router.get("/model/list")
+async def list_local_models() -> dict:
+    """List installed local Ollama models for the settings picker."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{ollama_native_base_url()}/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        return {"reachable": False, "error": str(exc), "models": []}
+
+    models = []
+    for model in data.get("models", []) or []:
+        details = model.get("details") or {}
+        models.append(
+            {
+                "name": model.get("name") or model.get("model") or "",
+                "size_mb": round((model.get("size") or 0) / 1e6, 1),
+                "parameter_size": details.get("parameter_size", ""),
+                "family": details.get("family", ""),
+            }
+        )
+    return {"reachable": True, "models": models}
+
+
+class VisionSettingsPayload(BaseModel):
+    provider: str | None = None
+    local_model: str | None = None
+    openrouter_model: str | None = None
+    ollama_cloud_model: str | None = None
+    openrouter_api_key: str | None = None
+    ollama_cloud_api_key: str | None = None
+    page_timeout_seconds: int | None = None
+
+
+@router.get("/settings/vision")
+async def get_vision_settings_endpoint() -> dict:
+    """Return current vision settings with API keys masked."""
+    current = vision_settings_store.load()
+    return vision_settings_store.public_view(current)
+
+
+@router.put("/settings/vision")
+async def put_vision_settings_endpoint(payload: VisionSettingsPayload) -> dict:
+    """Persist a vision-settings update."""
+    current = vision_settings_store.load()
+    next_settings = vision_settings_store.VisionSettings(
+        provider=payload.provider or current.provider,
+        local_model=payload.local_model or current.local_model,
+        openrouter_model=payload.openrouter_model or current.openrouter_model,
+        ollama_cloud_model=payload.ollama_cloud_model or current.ollama_cloud_model,
+        openrouter_api_key=(
+            payload.openrouter_api_key
+            if payload.openrouter_api_key is not None
+            else current.openrouter_api_key
+        ),
+        ollama_cloud_api_key=(
+            payload.ollama_cloud_api_key
+            if payload.ollama_cloud_api_key is not None
+            else current.ollama_cloud_api_key
+        ),
+        page_timeout_seconds=(
+            int(payload.page_timeout_seconds)
+            if payload.page_timeout_seconds is not None
+            else current.page_timeout_seconds
+        ),
+    )
+    saved = vision_settings_store.save(next_settings)
+
+    import os
+
+    os.environ["PDF_FIXER_VISION_PAGE_TIMEOUT"] = str(saved.page_timeout_seconds)
+    return vision_settings_store.public_view(saved)

@@ -82,7 +82,7 @@ def figure_alt_prompt_retry(*, context: str = "", image_type: str = "") -> str:
         "diagram": "Org chart showing Chancellor at top with 9 college presidents reporting",
         "infographic": "Timeline of campus development from 1950-2020 highlighting 5 major construction phases",
         "photograph": "Campus quad with 4 students studying under oak trees, Student Services building visible",
-        "": "Screenshot of login page with LACCD logo and username/password fields",
+        "": "Screenshot of login page with organization logo and username/password fields",
     }
     example = type_examples.get(image_type, type_examples[""])
 
@@ -226,8 +226,7 @@ def page_region_analysis_prompt(
         '  "reading_order": [1, 2, 3],\n'
         '  "order_changed": true,\n'
         '  "requires_resegmentation": false,\n'
-        '  "contrast_issues": [{"description": "...", "content_kind": "pdf_text|vector_text|image_text|diagram_artwork|unknown", "bbox": [0,0,0,0], "text_rgb": [0,0,0], "bg_rgb": [1,1,1], "fix_rgb": [0,0,0], "estimated_ratio": 3.2, "required_ratio": 4.5, "auto_fixable": true, "wcag_criterion": "1.4.3"}],\n'
-        '  "use_of_color_issues": [{"description": "...", "location": "...", "suggestion": "add a non-color cue"}],\n'
+        '  "contrast_issues": [{"description": "...", "text_rgb": [0,0,0], "bg_rgb": [1,1,1], "fix_rgb": [0,0,0]}],\n'
         '  "notes": "..."\n'
         "}\n"
         f"{detail}"
@@ -283,11 +282,7 @@ def contrast_detection_prompt(level: str = "AA") -> str:
         f"Analyze this PDF page image for color contrast issues under WCAG {level}.\n"
         f"{_LAYOUT_RULES}\n"
         "Examine text, image-of-text, form affordances, icons, lines, fills, and borders.\n"
-        "Return separate arrays for numeric contrast failures and WCAG 1.4.1 use-of-color failures.\n"
-        "For each contrast issue include content_kind: pdf_text, vector_text, image_text, diagram_artwork, or unknown. "
-        "Set auto_fixable true only when the foreground text/vector color can be safely changed in the PDF content stream. "
-        "For image text, diagram artwork, and unknown content, set auto_fixable false.\n"
-        "Return ONLY valid JSON with keys: issues, use_of_color_issues, page_has_contrast_issues, overall_assessment.\n"
+        "Return ONLY valid JSON matching the provided schema.\n"
         f"Thresholds: normal text {normal}, large text {large}, non-text graphics 3.0:1."
     )
 
@@ -406,6 +401,69 @@ def wcag_core_layout_verify_prompt(
         "}\n"
         "Each finding: {\"issue_id\": \"...\", \"severity\": \"error|warning\", "
         "\"message\": \"...\", \"suggested_fix\": \"...\", \"fixer\": \"fix_function_name\"}"
+    )
+
+
+def heading_hierarchy_quality_prompt(*, logical_order: str) -> str:
+    """Verify visual heading hierarchy against current PDF tags."""
+    return (
+        "You are a PDF accessibility expert verifying heading hierarchy.\n\n"
+        "Current tagged reading order. Element numbers are 1-based and must be used for corrections:\n"
+        f"{logical_order}\n\n"
+        "Use the rendered page image, not just the existing tag sequence. A structurally valid H1/H2/H3 "
+        "sequence can still be wrong when visual hierarchy disagrees with the tags.\n\n"
+        "Flag clear problems including:\n"
+        "- The document/page title or title-like prominent text is tagged as P/Span instead of H1/H2.\n"
+        "- A visible section/subsection heading has the wrong level for its visual prominence or nesting.\n"
+        "- Heading levels are semantically out of order for the visual page structure, even if they do not skip numerically.\n"
+        "- Body text, schedule rows, table rows, labels, page numbers, headers/footers, or fine print are tagged as H1-H6.\n"
+        "- A subtitle/byline/field label is over-promoted as a heading.\n\n"
+        "Be conservative: only use severity=error when the rendered page and current tag make the correction clear. "
+        "Use warning for ambiguous visual hierarchy or multi-page context uncertainty.\n\n"
+        "Return ONLY valid JSON:\n"
+        "{\n"
+        '  "status": "pass" | "fail",\n'
+        '  "findings": [\n'
+        '    {"severity": "error", "element_index": 4, "current_tag": "H1", '
+        '"visible_text": "Feb. 10 Review Syllabus", "message": "Schedule row is tagged as H1", '
+        '"correct_tag": "P", "suggested_fix": "Retag as P"}\n'
+        "  ]\n"
+        "}\n"
+        "When a specific tagged element can be safely corrected, include element_index and correct_tag as one of "
+        "H1, H2, H3, H4, H5, H6, P, or Span. For a missing heading where no tagged element maps cleanly, "
+        "omit element_index and explain the missing title/section heading."
+    )
+
+
+def page_alt_text_quality_prompt(*, figure_list: str) -> str:
+    """Verify figure alt text quality on a rendered PDF page."""
+    return (
+        "You are verifying image alt text quality for one PDF page under WCAG 1.1.1.\n\n"
+        "Current Figure tags, approximate page locations, and alt text:\n"
+        f"{figure_list}\n\n"
+        "Bboxes are normalized [left, top, right, bottom] coordinates on the rendered page. "
+        "Use them to match each tagged Figure to the visible image, chart, icon, logo, or decorative mark. "
+        "Evaluate every listed Figure. Do not pass alt text just because it exists.\n\n"
+        "Fail a Figure when the current alt text is missing, generic, placeholder-like, too vague, "
+        "swapped with another Figure, visually inaccurate, hallucinated, misleading, or too verbose to be useful. "
+        "For composite cover figures, fail when alt text only repeats logo/title text and omits a substantive "
+        "visible photo, map, chart, diagram, or other informative visual in the same figure. "
+        "Do not merge nearby real page text, running headers, or title text into a Figure's alt text unless that text "
+        "is clearly inside the listed Figure itself; if the figure bbox is unknown, prefer the non-text visual content. "
+        "For informative figures, suggested_alt_text must be accurate, specific, concise, and under 180 characters. "
+        "For purely decorative figures such as borders, spacers, flourishes, repeated watermarks, or background texture, "
+        "return status=fail, decorative=true, issue_type=\"decorative\", and suggested_alt_text=\"\" so the fixer can mark it as an artifact. "
+        "Do not fail real text-only content that is not one of the listed Figure tags.\n\n"
+        "Return ONLY valid JSON:\n"
+        "{\n"
+        '  "figures": [\n'
+        '    {"figure_index": 1, "status": "pass", "severity": "info", "decorative": false, '
+        '"issue_type": "", "message": "", "suggested_alt_text": "", "confidence": 0.93}\n'
+        "  ]\n"
+        "}\n"
+        "Allowed issue_type values: missing, generic, vague, swapped, inaccurate, hallucinated, verbose, decorative, other. "
+        "Use status=fail and severity=error only when the visual evidence is clear. "
+        "If uncertain, pass the figure and explain nothing."
     )
 
 

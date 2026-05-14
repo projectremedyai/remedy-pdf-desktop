@@ -8,9 +8,10 @@ import {
 
 interface Props {
   onReady: () => void;
+  onConfigureProvider: () => void;
 }
 
-export function ModelSetup({ onReady }: Props) {
+export function ModelSetup({ onReady, onConfigureProvider }: Props) {
   const [status, setStatus] = useState<ModelStatus | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
@@ -63,12 +64,12 @@ export function ModelSetup({ onReady }: Props) {
             </svg>
           </div>
           <h2 className="text-xl font-bold text-text" style={{ fontFamily: "var(--font-heading)" }}>
-            Set Up Local AI Runtime
+            Set Up Vision Provider
           </h2>
           <p className="mt-2 text-sm text-text-muted">
             Remedy PDF Desktop uses a bundled local Ollama runtime with the
-            <span className="font-medium text-text"> qwen3.5:4b </span>
-            model for vision-assisted checks. Download once, then everything runs locally.
+            <span className="font-medium text-text"> gemma4:e4b </span>
+            model by default. Cloud providers can be configured in Model Settings.
           </p>
         </div>
 
@@ -81,7 +82,7 @@ export function ModelSetup({ onReady }: Props) {
                 </div>
                 <div className="mt-2 text-base font-semibold text-text">{status.model_tag}</div>
                 <div className="mt-1 text-sm text-text-muted">
-                  {model?.params ?? "4.66B"} &middot; {model?.size_gb ?? "3.4"} GB download
+                  {model?.params ?? "4B effective"} &middot; {model?.size_gb ?? "9.6"} GB download
                 </div>
                 <div className="mt-1 text-xs text-text-muted">
                   Recommended for the local cross-platform desktop runtime.
@@ -101,11 +102,18 @@ export function ModelSetup({ onReady }: Props) {
               onClick={startDownload}
               className="w-full rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-primary/90"
             >
-              Download {status?.model_tag ?? "qwen3.5:4b"} ({model?.size_gb ?? "3.4"} GB)
+              Download {status?.model_tag ?? "gemma4:e4b"} ({model?.size_gb ?? "9.6"} GB)
+            </button>
+
+            <button
+              onClick={onConfigureProvider}
+              className="mt-3 w-full rounded-lg border border-elevated bg-canvas px-4 py-3 text-sm font-semibold text-text-muted transition-colors hover:border-text-muted hover:text-text"
+            >
+              Configure Cloud Provider
             </button>
 
             <p className="mt-3 text-center text-xs text-text-muted">
-              First-run internet is required once so the app can pull the local model.
+              Local setup needs a one-time model download.
             </p>
           </>
         )}
@@ -122,7 +130,7 @@ export function ModelSetup({ onReady }: Props) {
               {progress?.downloaded_mb ?? 0} MB / {progress?.total_mb ?? "?"} MB ({pct}%)
             </p>
             <p className="text-center text-xs text-text-muted">
-              Pulling {status?.model_tag ?? "qwen3.5:4b"} through the local Ollama runtime.
+              Pulling {status?.model_tag ?? "gemma4:e4b"} through the local Ollama runtime.
             </p>
             {progress?.status && (
               <p className="text-center text-xs text-text-muted">{progress.status}</p>

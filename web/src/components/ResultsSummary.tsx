@@ -478,7 +478,7 @@ function DownloadCard({
  *  - visual_diff_pct from fix_and_verify's diff gate (how much the remediated
  *    render differs from the source)
  *  - manual-review flag when diff exceeds the configured threshold
- *  - results of the post-remediation vision artifact check (the local Ollama model inspects
+ *  - results of the post-remediation vision artifact check (the selected vision provider inspects
  *    rendered pages for gray tints, stray boxes, missing text)
  *
  * Purpose: give the user a "should I eyeball this output?" signal before

@@ -197,11 +197,9 @@ function ProcessingEstimate({
       <div className="space-y-3 border-t border-elevated px-5 py-4 leading-relaxed text-text-muted">
         <p>
           Every PDF runs through 49 accessibility checks and fixes. Several of
-          them call an on-device 4.7B vision model (reading order, figure alt
-          text, heading detection, table structure, color contrast) — each
-          call takes a few seconds, and some steps run per page. Processing
-          entirely locally means nothing leaves your machine, but it's slower
-          than a cloud service.
+          them can call the selected vision provider (reading order, figure alt
+          text, heading detection, table structure, color contrast). Each call
+          takes a few seconds, and some steps run per page.
         </p>
 
         <div className="rounded-lg border border-elevated bg-canvas p-3">

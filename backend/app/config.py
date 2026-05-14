@@ -98,7 +98,7 @@ class Settings:
         default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11500/v1")
     )
     ollama_model_tag: str = field(
-        default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "qwen3.5:4b")
+        default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "gemma4:e4b")
     )
     ollama_models_dir: Path = field(
         default_factory=lambda: Path(

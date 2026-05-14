@@ -183,13 +183,12 @@ def check_accessibility(pdf_path: Path) -> AdobeCheckResult:
                         )
                         report_resp.raise_for_status()
                         report = report_resp.json()
+                        report = _load_adobe_report_payload(report)
                     else:
                         report = result_data
 
                     issues = _parse_adobe_report(report)
-                    passed = all(
-                        i.get("status") != "Failed" for i in issues
-                    )
+                    passed = _is_report_passed(report, issues)
 
                     return AdobeCheckResult(
                         checked=True,
@@ -220,20 +219,57 @@ def check_accessibility(pdf_path: Path) -> AdobeCheckResult:
         return AdobeCheckResult(error=str(e)[:200])
 
 
+def _load_adobe_report_payload(report: dict) -> dict:
+    """Download the actual Adobe report JSON if only an envelope is returned."""
+    if not isinstance(report, dict):
+        return report
+
+    if "Summary" in report and "Detailed Report" in report:
+        return report
+
+    download_uri = report.get("downloadUri")
+    if not isinstance(download_uri, str):
+        return report
+
+    try:
+        loaded = httpx.get(download_uri, timeout=30.0)
+        loaded.raise_for_status()
+        payload = loaded.json()
+        return payload if isinstance(payload, dict) else report
+    except Exception:
+        return report
+
+
 def _parse_adobe_report(report: dict) -> list[dict]:
     """Parse Adobe's accessibility report into a flat list of issues."""
     issues = []
 
-    # The report structure varies — handle both flat and nested formats
     if isinstance(report, dict):
+        detailed_report = report.get("Detailed Report") or report.get("detailed report")
+        if isinstance(detailed_report, dict):
+            for category, checks in detailed_report.items():
+                if isinstance(checks, list):
+                    for item in checks:
+                        if isinstance(item, dict):
+                            issues.append({
+                                "category": category,
+                                "check": item.get("Rule", item.get("check", "")),
+                                "status": _normalize_status(item),
+                                "description": item.get("Description", item.get("description", "")),
+                                "details": item.get("Details", item.get("details", [])),
+                            })
+
+        # The older flat format uses lowercase keys; keep support.
         for category, checks in report.items():
             if isinstance(checks, dict):
                 for check_name, check_data in checks.items():
-                    if isinstance(check_data, dict) and "status" in check_data:
+                    if isinstance(check_data, dict) and (
+                        "status" in check_data or "Status" in check_data
+                    ):
                         issues.append({
                             "category": category,
                             "check": check_name,
-                            "status": check_data.get("status", ""),
+                            "status": _normalize_status(check_data),
                             "description": check_data.get("description", ""),
                             "details": check_data.get("details", []),
                         })
@@ -246,3 +282,29 @@ def _parse_adobe_report(report: dict) -> list[dict]:
                         })
 
     return issues
+
+
+def _normalize_status(item: dict) -> str:
+    status = item.get("status", item.get("Status", ""))
+    if isinstance(status, str):
+        return status.strip()
+    return ""
+
+
+def _summary_count(summary: dict, key: str) -> int | None:
+    value = summary.get(key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_report_passed(report: dict, issues: list[dict]) -> bool:
+    summary = report.get("Summary") if isinstance(report, dict) else None
+    if isinstance(summary, dict):
+        failed = _summary_count(summary, "Failed") or 0
+        return failed == 0
+    failed = [i for i in issues if i.get("status", "").lower() == "failed"]
+    return len(failed) == 0

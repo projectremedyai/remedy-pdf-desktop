@@ -522,7 +522,7 @@ def _check_text_integrity(original_path: Path, gs_output_path: Path) -> bool:
     """Compare extracted text to detect GS font corruption.
 
     GS redistill with ``-dSubsetFonts=true`` can corrupt CID font subsetting
-    on some fonts (e.g. LAMC heading fonts), producing garbled/unreadable
+    on some fonts (notably CID-subset heading fonts), producing garbled/unreadable
     text.  The visual diff threshold is too coarse to catch this because the
     affected area is small relative to the full page.
 

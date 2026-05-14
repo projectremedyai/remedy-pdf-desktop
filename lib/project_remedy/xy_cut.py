@@ -2,7 +2,7 @@
 # Licensed under the Apache License, Version 2.0
 # http://www.apache.org/licenses/LICENSE-2.0
 #
-# Python port for Remedy PDF Desktop.
+# Python port for Project Remedy.
 # Original: XYCutPlusPlusSorter.java from opendataloader-pdf
 # Reference: arXiv:2504.10258 — XY-Cut++ reading order algorithm
 """XY-Cut++ reading order algorithm for PDF layout analysis.

@@ -46,7 +46,17 @@ export default function App() {
   }, [verificationMode]);
 
   if (modelReady === null) return null;
-  if (!modelReady) return <ModelSetup onReady={() => setModelReady(true)} />;
+  if (!modelReady) {
+    return (
+      <ModelSetup
+        onReady={() => setModelReady(true)}
+        onConfigureProvider={() => {
+          setModelReady(true);
+          setPage("model-settings");
+        }}
+      />
+    );
+  }
 
   const centerContent = page === "home" && (phase === "upload" || phase === "progress" || phase === "error");
 
@@ -84,13 +94,13 @@ export default function App() {
                 <p id="important-notice-title" className="font-semibold text-partial">Important Notice</p>
                 <p className="mt-2">
                   Documents are remediated <strong className="text-text">on this device</strong>.
-                  Core fixes use deterministic parsing and layout analysis, and
-                  vision-assisted checks use the local Ollama runtime and downloaded model.
+                  Core fixes use deterministic parsing and layout analysis.
+                  Vision-assisted checks use the provider selected in Model Settings.
                 </p>
                 <p className="mt-2">
                   Installing or updating that local model can require a one-time
-                  network download, but the document itself is not uploaded to an
-                  external accessibility service during local remediation.
+                  network download. The document itself is only sent to a cloud
+                  model when a cloud provider is selected.
                 </p>
                 <p className="mt-2">
                   <strong className="text-text">This tool is experimental and under active development.</strong>{" "}

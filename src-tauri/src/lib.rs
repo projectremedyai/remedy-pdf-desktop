@@ -12,7 +12,7 @@ const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: &str = "8000";
 const OLLAMA_HOST: &str = "127.0.0.1:11500";
 const OLLAMA_BASE_URL: &str = "http://127.0.0.1:11500/v1";
-const DEFAULT_MODEL_TAG: &str = "qwen3.5:4b";
+const DEFAULT_MODEL_TAG: &str = "gemma4:e4b";
 
 struct BackendHandle(Mutex<Option<Child>>);
 struct OllamaHandle(Mutex<Option<Child>>);

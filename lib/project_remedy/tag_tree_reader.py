@@ -15,6 +15,7 @@ Usage::
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -26,18 +27,13 @@ import pikepdf
 from project_remedy.pdf_checker import (
     _get_struct_type,
     _node_has_direct_content,
+    _resolve_pdf_object,
     walk_structure_tree,
 )
 
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
-
-
-class Severity(str, Enum):
-    ERROR = "error"
-    WARNING = "warning"
-    INFO = "info"
 
 
 SCREEN_READER_RULE_IDS = frozenset({
@@ -56,6 +52,12 @@ SCREEN_READER_RULE_IDS = frozenset({
     "sr-repeated-content",
     "sr-untagged-page",
 })
+
+
+class Severity(str, Enum):
+    ERROR = "error"
+    WARNING = "warning"
+    INFO = "info"
 
 
 @dataclass
@@ -152,55 +154,152 @@ class ValidationResult:
 _TEXT_OPS = frozenset({"Tj", "TJ", "'", '"'})
 
 
-def _extract_mcid_text(page: pikepdf.Page) -> dict[int, str]:
+def _env_int(name: str, default: int) -> int:
+    """Return a positive integer env override, falling back on bad input."""
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _iter_page_content_streams(page: pikepdf.Page) -> Generator[pikepdf.Stream, None, None]:
+    """Yield resolved content streams for a page."""
+    contents = page.get("/Contents")
+    if contents is None:
+        return
+
+    items = list(contents) if isinstance(contents, pikepdf.Array) else [contents]
+    for item in items:
+        try:
+            stream = _resolve_pdf_object(item)
+        except Exception:
+            continue
+        if isinstance(stream, pikepdf.Stream):
+            yield stream
+
+
+def _page_content_exceeds(page: pikepdf.Page, max_bytes: int) -> bool:
+    """Best-effort guard for pathological content streams.
+
+    ``pikepdf.parse_content_stream`` has to tokenize the fully decoded stream.
+    For very large/generated pages, that can dominate remediation time. We
+    check both raw and decoded byte counts and skip MCID text extraction when a
+    page is above the screen-reader simulator budget.
+    """
+    if max_bytes <= 0:
+        return False
+
+    raw_total = 0
+    decoded_total = 0
+    for stream in _iter_page_content_streams(page):
+        try:
+            raw_total += len(stream.read_raw_bytes())
+            if raw_total > max_bytes:
+                return True
+        except Exception:
+            pass
+        try:
+            decoded_total += len(stream.read_bytes())
+            if decoded_total > max_bytes:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _extract_mcid_text(
+    page: pikepdf.Page,
+    target_mcids: set[int] | None = None,
+) -> dict[int, str]:
     """Extract text content for each MCID on a page.
 
     Parses the content stream, tracks BDC/EMC nesting to associate
     text-showing operators with their MCID. Returns {mcid: text}.
+
+    ``target_mcids`` limits collected output for callers that only need a few
+    structure nodes. Large streams are skipped by default because the screen
+    reader simulator can still use structure-level /ActualText and /Alt without
+    blocking on tokenization. Set PDF_SCREEN_READER_ALLOW_LARGE_STREAMS=1 or
+    raise PDF_SCREEN_READER_MAX_STREAM_BYTES to force full parsing.
     """
+    max_stream_bytes = _env_int("PDF_SCREEN_READER_MAX_STREAM_BYTES", 1_000_000)
+    allow_large = os.environ.get("PDF_SCREEN_READER_ALLOW_LARGE_STREAMS", "").strip()
+    if not allow_large and _page_content_exceeds(page, max_stream_bytes):
+        return {}
+
     try:
         instructions = pikepdf.parse_content_stream(page)
     except Exception:
         return {}
 
     mcid_texts: dict[int, list[str]] = {}
-    mcid_stack: list[int | None] = []
+    mcid_stack: list[dict[str, object]] = []
+    max_ops = _env_int("PDF_SCREEN_READER_MAX_CONTENT_OPERATORS", 200_000)
 
-    for operands, operator in instructions:
+    for op_count, (operands, operator) in enumerate(instructions, start=1):
+        if max_ops > 0 and op_count > max_ops:
+            break
         op = str(operator)
 
         if op in ("BDC", "BMC"):
             mcid = None
+            actual_text = ""
             if op == "BDC" and len(operands) >= 2:
                 props = operands[1]
                 if isinstance(props, (pikepdf.Dictionary, pikepdf.Stream)):
                     pass  # already usable
                 elif isinstance(props, pikepdf.Object) and not isinstance(props, pikepdf.Name):
-                    try:
-                        props = props.resolve()
-                    except Exception:
-                        pass
+                    props = _resolve_pdf_object(props)
                 if isinstance(props, pikepdf.Dictionary):
                     mcid_val = props.get("/MCID")
                     if mcid_val is not None:
                         mcid = int(mcid_val)
-            mcid_stack.append(mcid)
+                    actual_raw = props.get("/ActualText")
+                    if actual_raw is not None:
+                        actual_text = _decode_pdf_string(actual_raw)
+            mcid_stack.append({
+                "mcid": mcid,
+                "actual_text": actual_text,
+                "actual_emitted": False,
+            })
 
         elif op == "EMC":
             if mcid_stack:
-                mcid_stack.pop()
+                frame = mcid_stack.pop()
+                mcid = frame.get("mcid")
+                actual_text = str(frame.get("actual_text") or "")
+                if (
+                    mcid is not None
+                    and actual_text
+                    and not bool(frame.get("actual_emitted"))
+                    and (
+                        target_mcids is None
+                        or int(mcid) in target_mcids
+                    )
+                ):
+                    mcid_texts.setdefault(int(mcid), []).append(actual_text)
 
         elif op in _TEXT_OPS and mcid_stack:
             # Find the innermost active MCID.
-            current_mcid = None
-            for m in reversed(mcid_stack):
-                if m is not None:
-                    current_mcid = m
+            current_frame = None
+            for frame in reversed(mcid_stack):
+                if frame.get("mcid") is not None:
+                    current_frame = frame
                     break
-            if current_mcid is None:
+            if current_frame is None:
                 continue
 
-            text = _decode_text_operands(operands, op)
+            current_mcid = int(current_frame["mcid"])
+            if target_mcids is not None and current_mcid not in target_mcids:
+                continue
+            actual_text = str(current_frame.get("actual_text") or "")
+            if actual_text:
+                if bool(current_frame.get("actual_emitted")):
+                    continue
+                text = actual_text
+                current_frame["actual_emitted"] = True
+            else:
+                text = _decode_text_operands(operands, op)
             if text:
                 mcid_texts.setdefault(current_mcid, []).append(text)
 
@@ -267,7 +366,7 @@ def _resolve_page_number(
     pg = node.get("/Pg")
     if pg is not None:
         try:
-            resolved = pg.resolve() if hasattr(pg, "resolve") else pg
+            resolved = _resolve_pdf_object(pg)
             idx = page_index.get(resolved.objgen)
             if idx is not None:
                 return idx
@@ -279,17 +378,11 @@ def _resolve_page_number(
     if kids is not None:
         items = list(kids) if isinstance(kids, pikepdf.Array) else [kids]
         for item in items:
-            resolved = item
-            if hasattr(item, "resolve"):
-                try:
-                    resolved = item.resolve()
-                except Exception:
-                    continue
+            resolved = _resolve_pdf_object(item)
             if isinstance(resolved, pikepdf.Dictionary) and "/Pg" in resolved:
                 try:
                     pg_obj = resolved["/Pg"]
-                    if hasattr(pg_obj, "resolve"):
-                        pg_obj = pg_obj.resolve()
+                    pg_obj = _resolve_pdf_object(pg_obj)
                     idx = page_index.get(pg_obj.objgen)
                     if idx is not None:
                         return idx
@@ -307,12 +400,7 @@ def _get_node_mcids(node: pikepdf.Dictionary) -> list[int]:
     items = list(kids) if isinstance(kids, pikepdf.Array) else [kids]
     mcids: list[int] = []
     for item in items:
-        resolved = item
-        if hasattr(item, "resolve"):
-            try:
-                resolved = item.resolve()
-            except Exception:
-                continue
+        resolved = _resolve_pdf_object(item)
         if not isinstance(resolved, pikepdf.Dictionary):
             # Direct integer MCID.
             try:
@@ -338,12 +426,7 @@ def _count_struct_children(node: pikepdf.Dictionary) -> int:
     items = list(kids) if isinstance(kids, pikepdf.Array) else [kids]
     count = 0
     for item in items:
-        resolved = item
-        if hasattr(item, "resolve"):
-            try:
-                resolved = item.resolve()
-            except Exception:
-                continue
+        resolved = _resolve_pdf_object(item)
         if isinstance(resolved, pikepdf.Dictionary) and "/S" in resolved:
             count += 1
     return count
@@ -357,12 +440,7 @@ def _annotation_fallback_text(node: pikepdf.Dictionary) -> str:
     items = list(kids) if isinstance(kids, pikepdf.Array) else [kids]
     parts: list[str] = []
     for item in items:
-        resolved = item
-        if hasattr(item, "resolve"):
-            try:
-                resolved = item.resolve()
-            except Exception:
-                continue
+        resolved = _resolve_pdf_object(item)
         if not isinstance(resolved, pikepdf.Dictionary):
             continue
         if str(resolved.get("/Type", "")) != "/OBJR":
@@ -371,7 +449,7 @@ def _annotation_fallback_text(node: pikepdf.Dictionary) -> str:
         if annot is None:
             continue
         try:
-            annot = annot.resolve() if hasattr(annot, "resolve") else annot
+            annot = _resolve_pdf_object(annot)
         except Exception:
             continue
         if not isinstance(annot, pikepdf.Dictionary):
@@ -385,7 +463,7 @@ def _annotation_fallback_text(node: pikepdf.Dictionary) -> str:
         action = annot.get("/A")
         if action is not None:
             try:
-                action = action.resolve() if hasattr(action, "resolve") else action
+                action = _resolve_pdf_object(action)
             except Exception:
                 action = None
         if isinstance(action, pikepdf.Dictionary):
@@ -413,10 +491,18 @@ def read_tag_tree(pdf_path: Path) -> TagTreeReport:
                 has_structure_tree=False,
             )
 
-        # Pre-extract MCID text for all pages.
+        # Pre-extract MCID text for smaller documents. On large/generated PDFs,
+        # full content-stream tokenization is not required for structural
+        # screen-reader validation and can dominate the remediation runtime.
         page_mcid_texts: dict[int, dict[int, str]] = {}
-        for idx, page in enumerate(pdf.pages):
-            page_mcid_texts[idx] = _extract_mcid_text(page)
+        max_text_pages = _env_int("PDF_SCREEN_READER_TEXT_EXTRACTION_MAX_PAGES", 20)
+        allow_large_text = os.environ.get(
+            "PDF_SCREEN_READER_EXTRACT_LARGE_TEXT",
+            "",
+        ).strip()
+        if page_count <= max_text_pages or allow_large_text:
+            for idx, page in enumerate(pdf.pages):
+                page_mcid_texts[idx] = _extract_mcid_text(page)
 
         # Walk structure tree in reading order.
         nodes: list[TagNode] = []
@@ -455,6 +541,13 @@ def read_tag_tree(pdf_path: Path) -> TagTreeReport:
             # Extract text from MCIDs.
             has_content = _node_has_direct_content(node)
             text = ""
+            actual_raw = node.get("/ActualText")
+            actual_text = ""
+            if actual_raw is not None:
+                try:
+                    actual_text = str(actual_raw).strip()
+                except Exception:
+                    actual_text = ""
             if has_content:
                 mcids = _get_node_mcids(node)
                 text_parts = []
@@ -466,6 +559,9 @@ def read_tag_tree(pdf_path: Path) -> TagTreeReport:
                 text = " ".join(text_parts)
                 if not text.strip():
                     text = _annotation_fallback_text(node)
+            if actual_raw is not None:
+                text = actual_text
+                has_content = has_content or bool(actual_text)
 
             nodes.append(TagNode(
                 tag=tag,
@@ -878,6 +974,8 @@ def _find_blank_pages(pdf_path: Path) -> set[int]:
     blank_pages: set[int] = set()
     doc = fitz.open(str(pdf_path))
     try:
+        if len(doc) > 50:
+            return blank_pages
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = " ".join(page.get_text("text").split())
