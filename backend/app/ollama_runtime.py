@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -15,6 +16,25 @@ from backend.app.config import settings
 logger = logging.getLogger(__name__)
 
 _HEALTH_TIMEOUT_SECONDS = 5.0
+
+_TASK_ALIASES = {
+    "alt": "alt_text_quality",
+    "alt_text": "alt_text_quality",
+    "alt_text_quality": "alt_text_quality",
+    "figure_alt": "alt_text_quality",
+    "figures": "alt_text_quality",
+    "contrast": "contrast",
+    "color_contrast": "contrast",
+    "heading": "heading_hierarchy",
+    "headings": "heading_hierarchy",
+    "heading_hierarchy": "heading_hierarchy",
+    "reading": "reading_order",
+    "reading_order": "reading_order",
+    "table": "table_structure",
+    "tables": "table_structure",
+    "table_structure": "table_structure",
+    "core_layout": "core_layout",
+}
 
 
 @dataclass(frozen=True)
@@ -26,6 +46,93 @@ class LocalOllamaStatus:
     models_dir: Path
     size_bytes: int | None = None
     error: str | None = None
+
+
+def _normalise_task_name(value: str) -> str:
+    key = str(value or "").strip().lower().replace("-", "_")
+    return _TASK_ALIASES.get(key, key)
+
+
+def _parse_task_map(raw: str | None) -> dict[str, str]:
+    """Parse comma-separated ``task:value`` pairs used for router aliases."""
+    result: dict[str, str] = {}
+    for item in str(raw or "").split(","):
+        item = item.strip()
+        if not item or ":" not in item:
+            continue
+        task, value = item.split(":", 1)
+        task_name = _normalise_task_name(task)
+        cleaned_value = value.strip()
+        if task_name and cleaned_value:
+            result[task_name] = cleaned_value
+    return result
+
+
+def _env_true(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _infer_vision_task(prompt: str) -> str | None:
+    """Infer a Remedy vision task from stable prompt markers.
+
+    Existing library calls pass only image + prompt to the provider, so the
+    desktop router keeps the integration small by classifying the prompt. The
+    checks below deliberately use task-specific phrases, not broad words like
+    "table" from the shared layout rules.
+    """
+    text = str(prompt or "").lower()
+
+    if (
+        "verifying image alt text quality" in text
+        or "current figure tags" in text
+        or "figure_index" in text
+        or "write specific, descriptive alt text" in text
+        or "your previous description was too generic" in text
+        or "describe each distinct image or graphic" in text
+        or "wcag 1.1.1" in text
+        and ("alt text" in text or "non-text content" in text)
+    ):
+        return "alt_text_quality"
+
+    if (
+        "verifying a data table" in text
+        or "current table structure from pdf tags" in text
+        or "table structure verification" in text
+        or "fix_table_headers" in text
+        or "describe this table for a screen reader summary" in text
+    ):
+        return "table_structure"
+
+    if (
+        "verifying heading hierarchy" in text
+        or "visual heading hierarchy" in text
+        or "heading_corrections" in text
+        or "correct_tag" in text
+        or "heading levels are appropriate" in text
+        or "heading hierarchy mismatches" in text
+    ):
+        return "heading_hierarchy"
+
+    if (
+        "structure-tree order" in text
+        or "structure tree order" in text
+        or "logical reading order" in text
+        or "reading_order" in text
+        or "order_changed" in text
+        or "visual top-to-bottom" in text
+    ):
+        return "reading_order"
+
+    if (
+        "checking color contrast" in text
+        or "color contrast issues" in text
+        or "contrast_issues" in text
+        or "wcag 1.4.3" in text
+        or "estimated_ratio" in text
+    ):
+        return "contrast"
+
+    return None
 
 
 def ollama_base_url() -> str:
@@ -101,6 +208,90 @@ def local_ollama_model_ready(timeout_seconds: float = _HEALTH_TIMEOUT_SECONDS) -
     return status.reachable and status.installed
 
 
+class TaskRoutedOllamaVisionProvider:
+    """Prompt-routed wrapper for Remedy's per-task MiniCPM adapters."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        default_model: str,
+        task_models: dict[str, str],
+        task_base_urls: dict[str, str] | None = None,
+        provider_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        from project_remedy.pdf_vision import OllamaVisionProvider
+
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = default_model
+        self.task_models = {
+            _normalise_task_name(task): model
+            for task, model in task_models.items()
+            if str(model or "").strip()
+        }
+        self.task_base_urls = {
+            _normalise_task_name(task): url.rstrip("/")
+            for task, url in (task_base_urls or {}).items()
+            if str(url or "").strip()
+        }
+        self._provider_factory = provider_factory or OllamaVisionProvider
+        self._providers: dict[tuple[str, str], Any] = {}
+        self._default_provider = self._provider_for(self.model, self.base_url)
+        self.last_base_url = self.base_url
+
+    @property
+    def node_urls(self) -> tuple[str, ...]:
+        return tuple(sorted({base for _model, base in self._providers}))
+
+    def _provider_for(self, model: str, base_url: str) -> Any:
+        key = (model, base_url.rstrip("/"))
+        provider = self._providers.get(key)
+        if provider is None:
+            provider = self._provider_factory(
+                base_url=key[1],
+                api_key=self.api_key,
+                model=key[0],
+            )
+            self._providers[key] = provider
+        return provider
+
+    def model_for_prompt(self, prompt: str) -> str:
+        task = _infer_vision_task(prompt)
+        if task == "core_layout" and task not in self.task_models:
+            task = "reading_order"
+        return self.task_models.get(task or "", self.model)
+
+    async def analyze_image(
+        self,
+        image_path: Path | None,
+        prompt: str,
+        *,
+        max_tokens: int = 4096,
+        response_format: dict | None = None,
+    ) -> str:
+        task = _infer_vision_task(prompt)
+        if task == "core_layout" and task not in self.task_models:
+            task = "reading_order"
+
+        model = self.task_models.get(task or "", self.model)
+        base_url = self.task_base_urls.get(task or "", self.base_url)
+        provider = (
+            self._default_provider
+            if model == self.model and base_url == self.base_url
+            else self._provider_for(model, base_url)
+        )
+        response = await provider.analyze_image(
+            image_path,
+            prompt,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        self.last_base_url = str(getattr(provider, "last_base_url", base_url))
+        return response
+
+
 def wait_for_ollama_ready(
     max_seconds: float = 60.0,
     poll_interval: float = 1.0,
@@ -165,11 +356,37 @@ def build_local_vision_provider(
 
     from project_remedy.pdf_vision import OllamaVisionProvider
 
-    return OllamaVisionProvider(
-        base_url=status.endpoint,
-        api_key="ollama",
-        model=status.model_tag,
-    )
+    task_models = _parse_task_map(os.getenv("OLLAMA_VISION_TASK_MODELS"))
+    if task_models:
+        missing: list[str] = []
+        for task, task_model in task_models.items():
+            task_status = get_local_ollama_status(
+                timeout_seconds=timeout_seconds,
+                model_tag=task_model,
+            )
+            if not (task_status.reachable and task_status.installed):
+                missing.append(f"{task}:{task_model}")
+        if missing and not _env_true("OLLAMA_VISION_ROUTER_ALLOW_FALLBACK"):
+            logger.warning(
+                "Local routed vision provider unavailable; task aliases missing: %s",
+                ", ".join(missing),
+            )
+            return None
+        if missing:
+            logger.warning(
+                "Local routed vision provider will fall back for missing aliases: %s",
+                ", ".join(missing),
+            )
+
+        return TaskRoutedOllamaVisionProvider(
+            base_url=status.endpoint,
+            api_key="ollama",
+            default_model=status.model_tag,
+            task_models=task_models,
+            task_base_urls=_parse_task_map(os.getenv("OLLAMA_VISION_TASK_BASE_URLS")),
+        )
+
+    return OllamaVisionProvider(base_url=status.endpoint, api_key="ollama", model=status.model_tag)
 
 
 async def stream_model_pull_events(

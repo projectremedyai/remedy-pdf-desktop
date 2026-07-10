@@ -29,3 +29,9 @@ openmemory.md
 .claude
 .cursor
 .playwright-mcp
+tools/minicpm_edge/data/
+tools/minicpm_edge/eval_runs/
+tools/minicpm_edge/outputs/
+tools/minicpm_edge/outputs*/
+tools/minicpm_edge/checkpoints/
+tools/minicpm_edge/remote_bundle/

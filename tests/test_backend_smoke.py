@@ -8,8 +8,21 @@ from fastapi.testclient import TestClient
 import backend.app.routes_api as routes_api
 from backend.app.config import settings
 from backend.app.main import app
-from backend.app.ollama_runtime import LocalOllamaStatus
+from backend.app.ollama_runtime import (
+    LocalOllamaStatus,
+    _infer_vision_task,
+    _parse_task_map,
+)
 from backend.app.routes_api import _safe_upload_name
+from project_remedy.vision_prompts import (
+    contrast_detection_prompt,
+    heading_hierarchy_quality_prompt,
+    page_alt_text_quality_prompt,
+    page_region_analysis_prompt,
+    reading_order_prompt,
+    semantic_reading_order_prompt,
+    wcag_table_verify_prompt,
+)
 
 
 def test_health_endpoint_returns_security_headers(monkeypatch) -> None:
@@ -97,6 +110,61 @@ def test_vision_settings_round_trip_masks_keys(monkeypatch, tmp_path: Path) -> N
 def test_upload_name_is_confined_to_safe_basename() -> None:
     assert _safe_upload_name(r"..\..\weird report?.pdf") == "weird_report_.pdf"
     assert _safe_upload_name("\x00../../") == "upload"
+
+
+def test_ollama_task_model_env_map_normalises_aliases() -> None:
+    parsed = _parse_task_map(
+        "alt:minicpm-alt,"
+        "heading:minicpm-heading,"
+        "color-contrast:minicpm-contrast,"
+        "table:minicpm-table,"
+        "reading_order:minicpm-reading,"
+        "bad-entry"
+    )
+
+    assert parsed == {
+        "alt_text_quality": "minicpm-alt",
+        "heading_hierarchy": "minicpm-heading",
+        "contrast": "minicpm-contrast",
+        "table_structure": "minicpm-table",
+        "reading_order": "minicpm-reading",
+    }
+
+
+def test_ollama_prompt_task_inference_matches_remedy_prompt_families() -> None:
+    assert (
+        _infer_vision_task(page_alt_text_quality_prompt(figure_list="1. Figure"))
+        == "alt_text_quality"
+    )
+    assert _infer_vision_task(contrast_detection_prompt("AA")) == "contrast"
+    assert (
+        _infer_vision_task(
+            heading_hierarchy_quality_prompt(logical_order="1. /H2 Title")
+        )
+        == "heading_hierarchy"
+    )
+    assert (
+        _infer_vision_task(
+            semantic_reading_order_prompt(element_list="1. /H2 Title")
+        )
+        == "heading_hierarchy"
+    )
+    assert (
+        _infer_vision_task(
+            reading_order_prompt(structure_order="1. /P Intro")
+        )
+        == "reading_order"
+    )
+    assert (
+        _infer_vision_task(
+            page_region_analysis_prompt(element_list="1. /P Intro", profile="local")
+        )
+        == "reading_order"
+    )
+    assert (
+        _infer_vision_task(wcag_table_verify_prompt("Table > TR > TH"))
+        == "table_structure"
+    )
 
 
 def test_removed_provider_classes_stay_absent() -> None:
