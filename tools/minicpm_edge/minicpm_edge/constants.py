@@ -67,10 +67,13 @@ TASKS: tuple[TaskSpec, ...] = (
     TaskSpec(
         key="reading_order",
         task_name="reading_order",
-        alias="minicpm-v46-remedy-reading-order-v1",
+        # v4 promoted 2026-07-10: trained on the synthetic corruption family,
+        # val 1.00 / val_hard 1.00 at 16x/1. Serve at 16x:1 (trained profile);
+        # the v1-era reading_order=4x:36 override is no longer required.
+        alias="minicpm-v46-remedy-reading-order-v4",
         source_dir="data_reading_order",
         local_dir="reading_order",
-        hub_repo="johnnyrobotai/remedy-minicpm-v46-reading-order-v1-lora",
+        hub_repo="johnnyrobotai/remedy-minicpm-v46-reading-order-v4-lora",
         min_status_accuracy=0.80,
     ),
     TaskSpec(
@@ -96,9 +99,15 @@ MULTITASK = TaskSpec(
 
 TASK_MODEL_MAP = {
     "contrast": "minicpm-v46-remedy-contrast-v1",
-    "reading_order": "minicpm-v46-remedy-reading-order-v1",
+    "reading_order": "minicpm-v46-remedy-reading-order-v4",
     "heading_hierarchy": "minicpm-v46-remedy-heading-v1",
     "table_structure": "minicpm-v46-remedy-table-v1",
+}
+
+# Retired aliases kept resolvable so saved desktop configs keep working; they
+# serve the currently promoted adapter for the task.
+LEGACY_ALIASES = {
+    "minicpm-v46-remedy-reading-order-v1": "reading_order",
 }
 
 ALIASES = {
@@ -106,6 +115,7 @@ ALIASES = {
     "minicpm-v46-remedy-alt-v1": "alt",
     **{task.alias: task.key for task in TASKS if task.key != "alt"},
     MULTITASK.alias: MULTITASK.key,
+    **LEGACY_ALIASES,
 }
 
 EXPECTED_COUNTS = {

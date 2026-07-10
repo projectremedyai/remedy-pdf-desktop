@@ -62,7 +62,8 @@ and contrast gates regressed.
 Current router policy:
 
 - table: `4x/36`
-- reading_order: `4x/36`
+- reading_order: `16x/1` (v4, trained and validated at this profile; the
+  v1-era `reading_order=4x:36` override is retired)
 - alt_text_quality: `16x/1`
 - contrast: `16x/1`
 - heading_hierarchy: `16x/1`
@@ -133,7 +134,7 @@ Router
       --include-multitask \
       --downsample-mode 16x \
       --max-slice-nums 1 \
-      --adapter-image-settings "table=4x:36,reading_order=4x:36" \
+      --adapter-image-settings "table=4x:36" \
       --print-env
 
 Adapter aliases:
@@ -142,7 +143,8 @@ Adapter aliases:
 - minicpm-v46-remedy-alt-v1
 - minicpm-v46-remedy-table-v1
 - minicpm-v46-remedy-contrast-v1
-- minicpm-v46-remedy-reading-order-v1
+- minicpm-v46-remedy-reading-order-v4 (promoted 2026-07-10; the retired
+  reading-order-v1 alias still resolves to this adapter)
 - minicpm-v46-remedy-heading-v1
 - minicpm-v46-remedy-multitask-v1
 
@@ -150,7 +152,7 @@ Desktop prototype env:
 
     OLLAMA_BASE_URL=http://127.0.0.1:<tunnel-port>/v1
     OLLAMA_VISION_MODEL=minicpm-v46-remedy
-    OLLAMA_VISION_TASK_MODELS=contrast:minicpm-v46-remedy-contrast-v1,reading_order:minicpm-v46-remedy-reading-order-v1,heading_hierarchy:minicpm-v46-remedy-heading-v1,table_structure:minicpm-v46-remedy-table-v1
+    OLLAMA_VISION_TASK_MODELS=contrast:minicpm-v46-remedy-contrast-v1,reading_order:minicpm-v46-remedy-reading-order-v4,heading_hierarchy:minicpm-v46-remedy-heading-v1,table_structure:minicpm-v46-remedy-table-v1
 
 Router readiness artifact:
 
