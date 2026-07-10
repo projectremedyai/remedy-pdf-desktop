@@ -19,6 +19,7 @@ from minicpm_edge.constants import (
     ALIASES,
     BASE_MODEL,
     DEFAULT_OUTPUT_ROOT,
+    LEGACY_ALIASES,
     MULTITASK,
     STABLE_ALIAS,
     TASK_MODEL_MAP,
@@ -361,6 +362,9 @@ def build_adapter_maps(args: argparse.Namespace) -> tuple[dict[str, Path], dict[
         TASK_MODEL_MAP["reading_order"]: "reading_order",
         TASK_MODEL_MAP["heading_hierarchy"]: "heading",
     }
+    # Retired aliases stay resolvable and serve the task's promoted adapter.
+    for legacy_alias, task_key in LEGACY_ALIASES.items():
+        aliases.setdefault(legacy_alias, task_key)
     if args.include_multitask:
         aliases[MULTITASK.alias] = MULTITASK.key
     return adapters, aliases
