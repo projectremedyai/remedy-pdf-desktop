@@ -129,3 +129,42 @@ python3 run_adapter_eval.py \
 - Do not build multitask v3 until both per-task v3 candidates pass.
 - Update the Hub adapter cards with v3 eval results before pushing
   (`--push-to-hub` on a rerun, or `huggingface-cli upload`).
+
+---
+
+# V4 Addendum — results (2026-07-10, Runpod H100)
+
+The v3 runs above FAILED their gates. Root-cause chain, in order of discovery:
+
+1. **Undertraining (the real killer).** This plan's training commands omitted
+   `--max-steps`; the trainer defaults to 1 epoch. v1 used `--max-steps 300`
+   (~12 epochs, per the adapter card). One-epoch runs (25–58 steps) collapse
+   into the "always pass" basin (train loss stuck ~4.3). Ruled out first:
+   task-tag eval mismatch (tag-injected re-evals: no effect), resolution
+   (worse at 16x/1), trainer label corruption (empirically verified clean).
+2. **Eval truncation.** `run_adapter_eval.py` defaults `--max-new-tokens 384`;
+   heading fail cases with multiple findings need more (v1's promotion eval
+   used 1024). All fail->None "invalid JSON" records in v3/v4 heading evals
+   were truncation artifacts. Always pass `--max-new-tokens 1024` for heading.
+
+## v4 results (v3 data unchanged, proper budgets)
+
+| Adapter | Profile | Steps | val | val_hard |
+|---|---|---|---|---|
+| reading-order v4 | 16x/1 | 300 | status **1.00**, JSON 1.00, FP 0 | **1.00** (51/51 corruptions caught) |
+| heading v4 | 4x/36 | 500 | status **1.00**, JSON 1.00, exact **0.829** | n/a |
+
+- **reading-order v4: PROMOTE.** First adapter proven robust across all five
+  corruption families (v1 was only ever tested on rotation).
+- **heading: keep v1 promoted.** The high-res hypothesis is refuted cleanly:
+  exact correction v1 0.857 > v2 0.848 > v4 0.829 — resolution does not fix
+  H2/H3/H4 level picks. Detection is perfect in v4 (status 1.00). The ~0.85
+  exact-correction ceiling across every variant points at **gold-label
+  ambiguity / missing document-level context**, not pixels. To beat the 0.90
+  gate, next candidates: multi-page context in the prompt, or a gold-label
+  audit of the confused pairs.
+- 2026-07-10 E2E gate (175 heldout docs): vision-driven dimensions healthy
+  (alt 0.93); structural dims failed (reading_order 0.47, table 0.51,
+  heading_semantics 0.65) — same failures under the cloud-model baseline, so
+  the bottleneck is `project_remedy`'s tag-tree writing, not the adapters.
+  Artifact: `eval_runs/e2e_gate_v1_full/`.
