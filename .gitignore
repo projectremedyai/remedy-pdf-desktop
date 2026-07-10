@@ -28,6 +28,15 @@ __pycache__/
 # Data (uploads, output, test files)
 /data/
 
+# MiniCPM edge training artifacts
+/tools/minicpm_edge/data/
+/tools/minicpm_edge/eval_runs/
+/tools/minicpm_edge/outputs/
+/tools/minicpm_edge/outputs*/
+/tools/minicpm_edge/checkpoints/
+/tools/minicpm_edge/remote_bundle/
+/tools/minicpm_edge/jobs.db
+
 # Node
 node_modules/
 web/dist/
@@ -87,6 +96,7 @@ test_*.py
 *.test.*
 *.spec.*
 !README.md
+!/tools/minicpm_edge/*.md
 
 # CI smoke tests are part of this repo.
 !tests/

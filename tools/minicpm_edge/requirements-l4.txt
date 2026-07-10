@@ -1,0 +1,12 @@
+accelerate
+av
+bitsandbytes
+datasets
+huggingface_hub
+hf_transfer
+peft
+pillow
+protobuf
+safetensors
+sentencepiece
+transformers[torch]>=5.7.0

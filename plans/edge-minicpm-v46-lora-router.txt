@@ -1,0 +1,213 @@
+# Edge MiniCPM-V-4.6 LoRA Router Plan
+
+This note maps the current `remedy-server` Qwen3-VL multi-LoRA pattern to a
+desktop/edge-friendly MiniCPM-V-4.6 path for `remedy-pdf-desktop`.
+
+## Current Pattern To Reuse
+
+The sibling repos already implement the right shape:
+
+- `remedy-server/tools/serve_remedy_router_peft.py` loads one base VLM, attaches
+  multiple PEFT adapters, switches adapters by requested model alias, and exposes
+  an OpenAI-compatible `/v1/chat/completions` API.
+- `remedy-server/tools/serve_remedy_router_vllm.py` does the same routing shape
+  for vLLM using `--enable-lora` and `--lora-modules`.
+- `remedy-server-multitask-next/tools/finetune/` has the durable training
+  substrate: task datasets, delivered-remediation mining, multitask unions,
+  PEFT/HF training, prediction generation, task metrics, and router-readiness
+  gates.
+- The current Hub setup under `johnnyrobotai` is a private PEFT adapter family on
+  `Qwen/Qwen3-VL-32B-Instruct`: stable alt-text v2 plus table, contrast, reading
+  order, and heading adapters.
+
+The important lesson from the existing alt-text v2 card is data design: adding
+"already good -> pass" examples fixed the v1 over-flagging behavior. Preserve
+that for MiniCPM.
+
+## MiniCPM-V-4.6 Fit
+
+`openbmb/MiniCPM-V-4.6` is a good target for desktop and edge exploration:
+
+- Apache-2.0 license.
+- Small architecture: SigLIP2-400M vision encoder plus Qwen3.5-0.8B text core.
+- Official support is listed for Transformers, vLLM, SGLang, llama.cpp, Ollama,
+  LLaMA-Factory, and ms-swift.
+- Official quantized variants exist: GGUF, AWQ, BNB, GPTQ, and MLX.
+- Config uses `MiniCPMV4_6ForConditionalGeneration`, `MiniCPMV4_6Processor`, and
+  image slicing parameters such as `downsample_mode`, `max_slice_nums`, and
+  `use_image_id`.
+
+Do not treat it as a drop-in Qwen3-VL trainer replacement. Reuse the data and
+evaluation code, but make the model loader/collator/server MiniCPM-specific.
+
+## Recommended Architecture
+
+Use two artifact layers:
+
+1. Training and validation artifact: PEFT LoRA adapters on
+   `openbmb/MiniCPM-V-4.6`.
+2. Desktop shipping artifact: whichever runtime wins the packaging test:
+   merged HF/Transformers sidecar, merged GGUF with llama.cpp, or MLX on macOS.
+
+Keep multi-adapter serving for Runpod/Heidi validation first. For end-user edge
+packaging, test both options:
+
+- Multi-adapter router: one MiniCPM base plus several LoRAs, selected by model
+  alias. This matches the Qwen server technique but needs a Python/PEFT or vLLM
+  runtime.
+- Single multitask adapter: one adapter trained on weighted task union. This is
+  likely simpler for GGUF/Ollama/llama.cpp desktop packaging if hot-swapping LoRA
+  adapters is awkward or slow.
+
+## Task Aliases
+
+Mirror the server aliases with MiniCPM names:
+
+```text
+minicpm-v46-remedy
+minicpm-v46-remedy-alt-v1
+minicpm-v46-remedy-table-v1
+minicpm-v46-remedy-contrast-v1
+minicpm-v46-remedy-reading-order-v1
+minicpm-v46-remedy-heading-v1
+minicpm-v46-remedy-multitask-v1
+```
+
+The desktop app already has an OpenAI-compatible vision provider path. The
+fastest prototype is to run a local MiniCPM router at `http://127.0.0.1:<port>/v1`
+and point the provider at those aliases.
+
+## Training Plan
+
+1. Baseline MiniCPM evaluation
+   - Serve base `openbmb/MiniCPM-V-4.6` with `transformers serve` or a custom
+     `serve_adapter_minicpm_openai.py`.
+   - Run the existing validation tools against base MiniCPM before tuning.
+   - Record valid JSON rate, status accuracy, false-positive rate, and latency.
+
+2. Dataset reuse
+   - Start with `johnnyrobotai/remedy-server-vlora` for alt-text.
+   - Reuse `build_delivered_dataset.py`, `build_multitask_dataset.py`, and the
+     task-specific corpus builders from `remedy-server-multitask-next`.
+   - Keep `tools/corpus_annotations/v1` as holdout only.
+   - Preserve pass-negative examples for alt text, heading, table, and reading
+     order tasks where possible.
+
+3. Per-task LoRAs
+   - Train language-tower-only LoRA first, rank 8 or 16.
+   - Use the same targets concept as the Qwen adapters:
+     `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`,
+     `down_proj`, constrained to the text tower when using a custom trainer.
+   - Only tune vision layers after an A/B proves it improves the hard visual
+     tasks without hurting JSON reliability.
+
+4. Multitask LoRA
+   - Union alt, table, contrast, reading_order, and heading_hierarchy.
+   - Weight sparse or high-risk tasks explicitly.
+   - Keep stable alias semantics conservative: do not promote multitask over
+     the strongest per-task adapters until heldout gates pass.
+
+5. Evaluation gates
+   - valid JSON rate >= 0.90 per task.
+   - pass false-positive rate <= 0.10.
+   - table status accuracy >= 1.00 for synthetic/gold validation.
+   - contrast status accuracy >= 0.90 and near-threshold accuracy >= 0.85.
+   - reading order status accuracy >= 0.80 initially, then raise after better
+     labels.
+   - heading status accuracy >= 0.95 with exact correction accuracy >= 0.85.
+   - End-to-end heldout PDF remediation must remain the final gate.
+
+## Runtime Plan
+
+Create MiniCPM-specific equivalents instead of mutating Qwen files in place:
+
+- `tools/finetune/train_lora_vision_minicpm.py`
+- `tools/finetune/generate_predictions_minicpm.py`
+- `tools/finetune/serve_remedy_router_minicpm_peft.py`
+- `tools/finetune/merge_or_export_minicpm.py`
+
+The server wrapper should:
+
+- Load `AutoProcessor` and `AutoModelForImageTextToText` for
+  `openbmb/MiniCPM-V-4.6`.
+- Convert OpenAI `image_url` messages to the MiniCPM content format.
+- Call `processor.apply_chat_template(..., downsample_mode="16x",
+  max_slice_nums=9 or 36, add_generation_prompt=True)`.
+- Pass the same `downsample_mode` to `model.generate`.
+- Load PEFT adapters with named aliases and switch with `set_adapter`.
+- Return the same OpenAI-compatible response shape the desktop provider already
+  consumes.
+
+For fidelity-heavy pages, test `downsample_mode="4x"` and `max_slice_nums=36`.
+For speed-first desktop mode, test `downsample_mode="16x"` and the default slice
+count.
+
+## Desktop Integration
+
+Shortest prototype:
+
+1. Run a local MiniCPM router with OpenAI-compatible `/v1/chat/completions`.
+2. Set `OLLAMA_BASE_URL=http://127.0.0.1:<port>/v1`.
+3. Set `OLLAMA_VISION_MODEL=minicpm-v46-remedy`.
+4. Keep the existing local provider path.
+
+Productized version:
+
+- Add a `custom_local` or `edge_router` provider in `backend/app/vision_settings.py`.
+- Add endpoint and model fields to the Model Settings UI.
+- Keep bundled Ollama as the default simple path, but allow the edge router as an
+  advanced local provider.
+- Optionally package a small launcher for the MiniCPM router alongside the
+  existing Tauri sidecars after the runtime format is settled.
+
+## Hardware Plan
+
+Runpod:
+
+- There is already a running H200 pod named `remedy-router-h200-20260706` at
+  about `$4.39/hr`; reuse or stop it before starting new work.
+- MiniCPM-V-4.6 should not need H200 for first passes. Prefer L4, RTX 4090, or
+  RTX 5090 for smoke and short LoRA runs.
+- Use H200 only for batch comparison, high-throughput eval, or if dependency
+  trouble makes the smaller GPUs slower overall.
+
+Heidi:
+
+- CLI auth is working and clusters are visible.
+- `heidi training create --file <spec.json>` is available, but no stacks were
+  listed in this session.
+- Use Runpod first for the reproducible prototype, then port the same container
+  command to Heidi once the job spec/stack is known.
+
+DGX Spark:
+
+- Good fit for bf16 adapter experiments.
+- Because MiniCPM is much smaller than the existing 32B Qwen path, reserve Spark
+  for full data sweeps, packaging conversions, and Mac/edge runtime validation.
+
+## First Build Slice
+
+1. Copy the existing finetune tools from `remedy-server-multitask-next` into a
+   private training branch or separate training folder.
+2. Add `serve_remedy_router_minicpm_peft.py` and prove base MiniCPM can answer
+   one Remedy prompt through `/v1/chat/completions`.
+3. Train `minicpm-v46-remedy-alt-v1` from the existing alt-text v2 data.
+4. Evaluate base vs tuned on the same alt-text gate that proved Qwen v2.
+5. If tuned MiniCPM beats base on valid JSON and false-positive behavior, train
+   table, heading, reading_order, and contrast adapters.
+6. Test multitask adapter vs router.
+7. Package the winning route for desktop: PEFT sidecar first, GGUF/MLX second.
+
+## Open Risks
+
+- MiniCPM adapter support in llama.cpp/Ollama may not support the exact
+  multi-LoRA hot-swap pattern. If so, use a single multitask adapter or multiple
+  merged task models behind a small router.
+- Qwen3-VL adapter cards are incomplete for task-specific adapters. Update the
+  cards before creating the MiniCPM family so provenance and eval results remain
+  auditable.
+- The desktop UI currently assumes local models come from Ollama `/api/tags`.
+  A custom edge router needs either a separate provider mode or a compatibility
+  shim.
+- Valid JSON may be harder on a 0.8B text core. JSON repair/retry may be needed,
+  but promotion should be based on raw valid JSON first.
