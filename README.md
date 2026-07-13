@@ -2,6 +2,12 @@
 
 Remedy PDF Desktop is a local-first document accessibility remediation application. It accepts PDF, Word, PowerPoint, and Excel files, produces a remediated output plus an HTML accessibility report, and surfaces signals for manual review before publication.
 
+> **Download (macOS):** a signed + notarized `.dmg` installer is published on the
+> [Releases](https://github.com/projectremedyai/remedy-pdf-desktop/releases) page.
+> Double-click, drag the app to Applications, and launch — it bundles the Ollama
+> runtime and backend, and pulls the default vision model on first run. No
+> Hugging Face account or manual Ollama install required.
+
 ## What this tool is / is not
 
 **It is** an automated triage for the machine-testable subset of PDF/UA-1 and WCAG 2.1 AA:
@@ -94,6 +100,48 @@ The Tauri shell starts the local backend and local Ollama runtime for the deskto
 pytest tests/ -v
 cd web && npm run lint && npm run build
 ```
+
+## Building a Distributable macOS Release
+
+`scripts/release_macos.sh` produces a **signed + notarized `.dmg`** with the Ollama
+runtime and Python backend bundled, so end users need nothing preinstalled.
+
+### Prerequisites
+
+- An Apple **Developer ID Application** signing identity in your keychain
+  (`security find-identity -v -p codesigning`).
+- `npm install` at the repo root (installs the Tauri CLI), plus `pyinstaller` and
+  the Xcode command-line tools (`codesign`, `xcrun`, `hdiutil`, `spctl`).
+- The macOS Ollama runtime placed in `resources/ollama/macos/` (git-ignored,
+  ~430 MB — see `resources/ollama/macos/README.md` for how to populate it).
+- Notarization credentials in a git-ignored `.env.local` at the repo root:
+
+  ```bash
+  APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+  APPLE_TEAM_ID="TEAMID"
+  APPLE_ID="you@example.com"
+  APPLE_PASSWORD="xxxx-xxxx-xxxx-xxxx"   # app-specific password from appleid.apple.com
+  ```
+
+### Build
+
+```bash
+bash scripts/release_macos.sh --dry-run   # validate creds/toolchain/identity, no build
+bash scripts/release_macos.sh             # full build -> signed + notarized .dmg
+```
+
+The script builds the web frontend, freezes the backend with PyInstaller,
+pre-signs the nested Ollama + Python runtimes with hardened-runtime entitlements
+(`src-tauri/entitlements.plist`), builds the `.app` with Tauri, packages a `.dmg`
+with `hdiutil`, then codesigns, notarizes, and staples it. The installer lands in
+`src-tauri/target/release/bundle/dmg/`.
+
+> **Notarization notes (if you touch this path):** PyInstaller ships libpython as a
+> framework whose `_internal/Python` symlink fails Apple notarization ("signature
+> invalid") — the script replaces it with a flat-signed real copy (Stage 4a). It
+> also has Tauri sign-but-not-notarize and notarizes the *filesystem* `.dmg`
+> (which preserves the framework symlinks) instead of a zip of the `.app`. The
+> reasoning is documented inline in `scripts/release_macos.sh`.
 
 ## Interpreting Results
 

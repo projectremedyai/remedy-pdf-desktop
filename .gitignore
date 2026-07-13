@@ -109,3 +109,7 @@ screenshots/
 # Local analysis artifacts
 /graphify-out/
 /tools/minicpm_edge/logs/
+.env.local
+
+# Built installers (large, not committed)
+releases/
