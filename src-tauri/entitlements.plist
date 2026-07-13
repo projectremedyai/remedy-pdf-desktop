@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Hardened-runtime entitlements for the bundled native runtimes.
+
+      The app ships two nested Mach-O trees that run under hardened runtime:
+        - the Ollama server (Go binary that JIT-compiles Metal shaders and
+          dlopen()s the ggml / llama / mlx dylibs), and
+        - the PyInstaller Python backend (loads compiled C extensions).
+
+      Under hardened runtime with no entitlements these commonly fail to
+      launch or get rejected by notarization. This is the standard trio used
+      by Tauri/Electron apps that bundle native inference runtimes:
+        - allow-jit / allow-unsigned-executable-memory: Metal shader JIT and
+          llama.cpp code generation need writable+executable memory.
+        - disable-library-validation: lets the main app and sidecars load the
+          bundled dylibs (all signed with the same Developer ID, but this
+          avoids team-id / platform-binary validation edge cases across the
+          Ollama, llama-server, and mlx libraries).
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

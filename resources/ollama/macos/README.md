@@ -4,9 +4,15 @@ This directory holds the macOS Ollama standalone CLI distribution that the
 Tauri shell bundles into the packaged `.app` so the local vision/text
 runtime works without requiring users to install Ollama separately.
 
-The binaries are **not** stored in git (they total ~400 MB and rotate
+The binaries are **not** stored in git (they total ~430 MB and rotate
 with each Ollama release). `scripts/release_macos.sh` and any future
 release pipeline should populate this directory before `tauri build`.
+
+**Currently bundled:** Ollama **0.31.2** (universal x86_64+arm64), sourced
+from the local `/Applications/Ollama.app/Contents/Resources` install (the
+GUI-only `*.png`/`*.icns` assets are intentionally excluded). Re-populate from
+the official `ollama-darwin.tgz` for a clean release; keep this version note in
+sync with what is actually shipped.
 
 ## What goes here
 
