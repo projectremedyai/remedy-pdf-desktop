@@ -7601,10 +7601,180 @@ def _ensure_first_page_metadata_title_heading(pdf: pikepdf.Pdf) -> tuple[int, in
 
     demoted = 0
     for node in first_page_headings:
-        if not _structure_node_text(node):
+        if not _heading_has_renderable_text(node):
             node["/S"] = pikepdf.Name("/P")
             demoted += 1
     return 1, demoted
+
+
+def _norm_heading_match_text(text: str) -> str:
+    """Whitespace-collapsed, case-folded text used for title↔node matching.
+
+    Control/non-printable characters (common as mojibake prefixes on tagged
+    forms, e.g. ``\\x00\\x03``) are dropped so they don't defeat containment.
+    """
+    cleaned = "".join(ch for ch in (text or "") if ch.isprintable() or ch.isspace())
+    return re.sub(r"\s+", " ", cleaned).strip().casefold()
+
+
+def _alnum_key(text: str) -> str:
+    """Alphanumeric-only, case-folded key — tolerant of punctuation/letter
+    spacing noise (``VOLUNTEER / INTERN`` vs ``VOLUNTEER/INTERN``)."""
+    return re.sub(r"[^a-z0-9]", "", (text or "").casefold())
+
+
+def _match_first_page_node_by_text(
+    pdf: pikepdf.Pdf,
+    target_text: str,
+    *,
+    page_idx: int = 0,
+    min_chars: int = 4,
+) -> pikepdf.Dictionary | None:
+    """Find an existing ``/P``/``/Span``/``/NonStruct`` node on ``page_idx``
+    whose screen-reader (MCID) text matches ``target_text``.
+
+    The text is extracted with the *same* MCID reader the heading judge uses
+    (``tag_tree_reader``), so a node promoted here reads as a non-empty heading
+    to the judge. Returns the first qualifying node in reading order (which for
+    a title is the top-most block), or ``None``. Never creates a node — the
+    promotion target must already own page content so the heading stays
+    "associated with content" for Adobe/UA.
+    """
+    from project_remedy.tag_tree_reader import (
+        _extract_mcid_text,
+        _get_node_mcids as _tt_get_node_mcids,
+    )
+
+    target = _norm_heading_match_text(target_text)
+    if len(target) < min_chars or page_idx >= len(pdf.pages):
+        return None
+    try:
+        page_texts = _extract_mcid_text(pdf.pages[page_idx])
+    except Exception:
+        return None
+
+    target_key = _alnum_key(target)
+    fallback: pikepdf.Dictionary | None = None
+    for node, _depth, _parent in walk_structure_tree(pdf):
+        if _get_struct_type(node) not in ("P", "Span", "NonStruct"):
+            continue
+        if _find_node_page(node, pdf) != page_idx:
+            continue
+        mcids = _tt_get_node_mcids(node)
+        if not mcids:
+            continue
+        node_text = _norm_heading_match_text(
+            " ".join(page_texts.get(m, "") for m in mcids)
+        )
+        if len(node_text) < min_chars:
+            continue
+        if node_text == target or target in node_text or node_text in target:
+            return node
+        # Secondary, noise-tolerant match: compare alphanumeric-only keys so
+        # punctuation/letter spacing ("VOLUNTEER / INTERN") still matches. Only
+        # for substantial titles to avoid spurious short-fragment matches.
+        if fallback is None and len(target_key) >= 12:
+            node_key = _alnum_key(node_text)
+            if node_key and (node_key in target_key or target_key in node_key):
+                fallback = node
+    return fallback
+
+
+def _confident_title_candidates(pdf: pikepdf.Pdf) -> list[str]:
+    """Confident first-page title sources, highest priority first.
+
+    Only sources a human would read as the document title: the metadata title
+    (unless it is filename/junk), the largest top-most first-page text block(s),
+    and the first bookmark label. These feed ``_match_first_page_node_by_text``
+    so a title is only ever adopted when it corresponds to real page content.
+    """
+    candidates: list[str] = []
+
+    def _add(text: str) -> None:
+        cleaned = _normalize_extracted_text(text)
+        if (
+            cleaned
+            and len(cleaned) <= 120
+            and len(cleaned.split()) <= 14
+            and cleaned not in candidates
+        ):
+            candidates.append(cleaned)
+
+    # 1. Metadata title (skip filename-derived / junk titles).
+    meta_title = _normalize_extracted_text(_get_title_from_metadata(pdf))
+    if meta_title and not _metadata_title_needs_replacement(meta_title):
+        _add(meta_title)
+
+    # 2. Largest, top-most first-page text block(s) — the visually-evident title.
+    pdf_path = getattr(pdf, "filename", None)
+    if pdf_path:
+        try:
+            blocks, _img = _extract_fitz_text_blocks(Path(str(pdf_path)), 0)
+        except Exception:
+            blocks = []
+        if blocks:
+            max_font = max(b.font_size for b in blocks)
+            big = [
+                b
+                for b in blocks
+                if b.font_size >= max_font - 0.5 and 1 <= len(b.text.split()) <= 14
+            ]
+            big.sort(key=lambda b: b.top)  # top-most first
+            for b in big[:3]:
+                _add(b.text)
+
+    # 3. First bookmark / outline label.
+    try:
+        with pdf.open_outline() as outline:
+            for item in outline.root:
+                _add(str(getattr(item, "title", "") or ""))
+                break
+    except Exception:
+        pass
+
+    return candidates
+
+
+def _ensure_document_has_title_heading(pdf: pikepdf.Pdf) -> int:
+    """Last-resort heading coverage for zero-heading documents.
+
+    When every earlier heading pass has left the document with no heading that
+    carries renderable text, promote a confident first-page title node to
+    ``/H1`` so screen-reader navigation has at least a document title. The
+    heading behavioral proxy returns a hard 0.0 for a doc with no headings, so
+    this closes the ``no_headings`` coverage gap without disturbing documents
+    that already have (or genuinely lack) headings.
+
+    Conservative by construction:
+    - fires only when the doc has zero renderable headings,
+    - only ever *promotes an existing* first-page node (never fabricates one),
+    - only from a confident title source.
+    """
+    if len(pdf.pages) == 0:
+        return 0
+    for node, _depth, _parent in walk_structure_tree(pdf):
+        if re.match(r"^H[1-6]$", _get_struct_type(node)) and _heading_has_renderable_text(node):
+            return 0
+
+    # Mirror the heading judge's text-extraction page cap: on large documents
+    # it does not extract MCID text, so a promoted title would read as an
+    # *empty* heading (a worse finding than no_headings). Leave those alone.
+    try:
+        max_text_pages = int(
+            os.environ.get("PDF_SCREEN_READER_TEXT_EXTRACTION_MAX_PAGES", "20")
+        )
+    except ValueError:
+        max_text_pages = 20
+    allow_large = os.environ.get("PDF_SCREEN_READER_EXTRACT_LARGE_TEXT", "").strip()
+    if len(pdf.pages) > max_text_pages and not allow_large:
+        return 0
+
+    for candidate in _confident_title_candidates(pdf):
+        node = _match_first_page_node_by_text(pdf, candidate)
+        if node is not None:
+            node["/S"] = pikepdf.Name("/H1")
+            return 1
+    return 0
 
 
 def fix_heading_nesting(pdf: pikepdf.Pdf) -> list[str]:
@@ -8572,6 +8742,75 @@ def _append_actual_text_list(
         _append_struct_child(list_elem, li)
 
 
+def _tag_text_printable_ratio(text: str) -> float:
+    """Fraction of characters that are ordinary printable text (not mojibake).
+
+    Badly-encoded (e.g. UTF-16-decoded-as-Latin1) tag text is riddled with NUL
+    and control characters, so a low ratio is a reliable garble signal.
+    """
+    if not text:
+        return 1.0
+    ok = sum(
+        1
+        for ch in text
+        if ch in " \t\r\n" or (ch.isprintable() and ch != "�")
+    )
+    return ok / len(text)
+
+
+def _visible_text_scaffold_skip_pages(
+    pdf_path: Path,
+    *,
+    min_printable: float = 0.90,
+    min_coverage: float = 0.75,
+) -> set[int]:
+    """Pages already well-tagged with clean text that must NOT be scaffolded.
+
+    The visible-text scaffold exists to rebuild pages whose existing tags carry
+    garbled/mojibake text or genuinely miss most of the page's words. On a page
+    that is already cleanly and adequately tagged it does harm: it appends a
+    second, parallel copy of the content under new ``/Sect`` nodes (duplicating
+    the reading order and the headings, and — because it downgrades the original
+    ``P``/``H`` nodes to ``/Span`` — moving the authoritative headings into the
+    scaffold copy).
+
+    A page is treated as already-good, and therefore skipped, when its existing
+    tagged text is mostly printable (not garbled) AND already covers the bulk of
+    the visible text on the page. Genuinely garbled pages (low printable ratio)
+    and genuinely sparse pages (tags cover little of the visible text) are left
+    for the scaffold, preserving its intended behavior.
+    """
+    try:
+        from project_remedy.tag_tree_reader import read_tag_tree
+
+        report = read_tag_tree(pdf_path)
+    except Exception:
+        return set()
+
+    page_tagged: dict[int, list[str]] = defaultdict(list)
+    for node in report.nodes:
+        text = node.text or node.alt_text or ""
+        if text:
+            page_tagged[node.page].append(text)
+
+    skip: set[int] = set()
+    for page_idx, parts in page_tagged.items():
+        tagged_text = " ".join(parts)
+        if _tag_text_printable_ratio(tagged_text) <= min_printable:
+            continue  # garbled tags — the scaffold is meant for this page
+        try:
+            entries = _visible_text_line_entries_for_page(pdf_path, page_idx)
+        except Exception:
+            continue
+        visible_chars = len("".join("".join(e.text for e in entries).split()))
+        if visible_chars == 0:
+            continue
+        tagged_chars = len("".join(tagged_text.split()))
+        if tagged_chars / visible_chars >= min_coverage:
+            skip.add(page_idx)
+    return skip
+
+
 def fix_sparse_visible_text_structure(pdf: pikepdf.Pdf) -> list[str]:
     """Create a semantic text scaffold when visible text is richer than tags.
 
@@ -8642,11 +8881,17 @@ def fix_sparse_visible_text_structure(pdf: pikepdf.Pdf) -> list[str]:
         if stype in textish_tags:
             text_nodes_by_page.setdefault(page_idx, []).append(node)
 
+    # Skip pages that are already cleanly and adequately tagged — scaffolding
+    # them only duplicates their content (see _visible_text_scaffold_skip_pages).
+    scaffold_skip_pages = _visible_text_scaffold_skip_pages(pdf_path)
+
     visible_entries_by_page: dict[int, list[_VisibleLine]] = {}
     visible_lines_by_page: dict[int, list[str]] = {}
     candidates: list[int] = []
     for idx, count in page_counts.items():
         if idx in synthetic_pages:
+            continue
+        if idx in scaffold_skip_pages:
             continue
         entries = _visible_text_line_entries_for_page(pdf_path, idx)
         lines = [entry.text for entry in entries]
@@ -9228,6 +9473,43 @@ def _structure_node_text(node: pikepdf.Dictionary) -> str:
     return ""
 
 
+def _heading_has_renderable_text(node: pikepdf.Dictionary) -> bool:
+    """Whether a heading node has text a screen reader would actually speak.
+
+    ``_structure_node_text`` only inspects ``/ActualText``, ``/Alt`` and ``/T``,
+    so a heading whose text lives in MCID marked content (the common case) or in
+    a child ``Span``/``P`` looks empty to it. The empty-heading demotion passes
+    must not treat such headings as blank — doing so silently destroys valid
+    document structure. Treat a heading as having text when it carries
+    ActualText/Alt/T, owns marked content (MCIDs), or has any descendant struct
+    element that does.
+    """
+    if _structure_node_text(node):
+        return True
+    if _get_node_mcids(node):
+        return True
+    stack: list = []
+    kids = node.get("/K")
+    if kids is not None:
+        stack.extend(list(kids) if isinstance(kids, pikepdf.Array) else [kids])
+    visited = 0
+    while stack and visited < 256:
+        visited += 1
+        item = stack.pop()
+        try:
+            resolved = _resolve_pdf_object(item)
+        except Exception:
+            continue
+        if not isinstance(resolved, pikepdf.Dictionary):
+            continue
+        if _structure_node_text(resolved) or _get_node_mcids(resolved):
+            return True
+        sub = resolved.get("/K")
+        if sub is not None:
+            stack.extend(list(sub) if isinstance(sub, pikepdf.Array) else [sub])
+    return False
+
+
 def _invoice_text_corpus(
     pdf: pikepdf.Pdf,
     page_nodes: dict[int, list[pikepdf.Dictionary]],
@@ -9432,6 +9714,7 @@ def _fix_subtitle_and_transitional_headings(pdf: pikepdf.Pdf) -> list[str]:
             text = _structure_node_text(node)
             if (
                 not text
+                and not _heading_has_renderable_text(node)
                 and (
                     page_idx in pages_with_text_headings
                     or any(_structure_node_text(candidate) for candidate in nodes)
@@ -15997,6 +16280,41 @@ def fix_and_verify(
             pdf_path.stem + "_fixed" + pdf_path.suffix
         )
 
+    # --- Catalog time budget (P6) -------------------------------------------
+    # All controls default to preserving the current behavior. A deadline (when
+    # set) short-circuits the O(pages) verify cycles and the expensive whole-doc
+    # conformance pass; large documents are capped to a single verify cycle so
+    # per-cycle re-validation / per-figure vision cannot dominate on catalogs.
+    import time as _time
+
+    _fix_start = _time.monotonic()
+    try:
+        _deadline_seconds = float(os.environ.get("PDF_FIX_DEADLINE_SECONDS", "0") or "0")
+    except ValueError:
+        _deadline_seconds = 0.0
+    _fix_deadline = _fix_start + _deadline_seconds if _deadline_seconds > 0 else None
+
+    def _past_fix_deadline() -> bool:
+        return _fix_deadline is not None and _time.monotonic() >= _fix_deadline
+
+    try:
+        _large_doc_pages = int(os.environ.get("PDF_FIX_LARGE_DOC_PAGES", "50"))
+    except ValueError:
+        _large_doc_pages = 50
+    if _large_doc_pages > 0:
+        try:
+            with pikepdf.open(pdf_path) as _probe:
+                _probe_page_count = len(_probe.pages)
+        except Exception:
+            _probe_page_count = 0
+        if _probe_page_count > _large_doc_pages:
+            max_cycles = min(max_cycles, 1)
+            logger.info(
+                "fix_and_verify: %s has %d pages (> %d) — capping verify cycles to %d",
+                getattr(pdf_path, "name", pdf_path), _probe_page_count,
+                _large_doc_pages, max_cycles,
+            )
+
     # Cycle 1: full fix_all().
     report = fix_all(
         pdf_path, output_path,
@@ -16017,6 +16335,12 @@ def fix_and_verify(
 
     # Verification cycles.
     for cycle in range(max_cycles):
+        if _past_fix_deadline():
+            report.skipped.append(
+                f"Verify cycle {cycle + 1} skipped — fix deadline "
+                f"({_deadline_seconds:.0f}s) exceeded"
+            )
+            break
         sr_result = validate_tag_tree(output_path)
         if sr_result.passed:
             break
@@ -16129,9 +16453,21 @@ def fix_and_verify(
     except Exception:
         pass
 
-    _apply_final_vision_quality_repairs(report, vision_provider)
+    if _past_fix_deadline():
+        report.skipped.append(
+            f"Final vision quality repair skipped — fix deadline "
+            f"({_deadline_seconds:.0f}s) exceeded"
+        )
+    else:
+        _apply_final_vision_quality_repairs(report, vision_provider)
 
     # Conformance repair: veraPDF-driven structure repair pass.
+    if conformance_repair and _past_fix_deadline():
+        report.skipped.append(
+            f"Conformance repair skipped — fix deadline "
+            f"({_deadline_seconds:.0f}s) exceeded"
+        )
+        conformance_repair = False
     if conformance_repair:
         _STRUCTURE_RULES = {"7.1-1", "7.1-2", "7.1-3", "7.5-1"}
         _UNTAGGED_CONTENT_RULES = {"7.1-3", "7.5-1"}
@@ -16637,6 +16973,10 @@ def _apply_final_vision_quality_repairs(report: FixReport, vision_provider) -> N
             changes.extend(_synthesize_prominent_page_headings(pdf))
             changes.extend(_fix_subtitle_and_transitional_headings(pdf))
             changes.extend(fix_heading_nesting(pdf))
+            if _ensure_document_has_title_heading(pdf):
+                changes.append(
+                    "Synthesized first-page title heading (zero-heading fallback)"
+                )
             if os.environ.get("PDF_FINAL_TABLE_REGULARITY_REPAIR", "1").lower() not in {
                 "0",
                 "false",
@@ -16653,6 +16993,28 @@ def _apply_final_vision_quality_repairs(report: FixReport, vision_provider) -> N
                 )
     except Exception as exc:
         report.skipped.append(f"Final vision quality repair: error — {exc}")
+
+
+def _figure_layout_bbox_area(node: pikepdf.Dictionary) -> float:
+    """Area of a Figure's layout /BBox (P6 top-N-largest ranking).
+
+    /BBox lives on the figure's layout attributes (/A) or, on some producers,
+    directly on the node. Absent → area 0 (kept, but ranked last), so a count
+    cap still bounds the number of vision calls.
+    """
+    bbox = None
+    attrs = node.get("/A")
+    if isinstance(attrs, pikepdf.Dictionary):
+        bbox = attrs.get("/BBox")
+    if bbox is None:
+        bbox = node.get("/BBox")
+    try:
+        if bbox is not None and len(bbox) >= 4:
+            x0, y0, x1, y1 = (float(bbox[i]) for i in range(4))
+            return abs((x1 - x0) * (y1 - y0))
+    except Exception:
+        pass
+    return 0.0
 
 
 def _fix_missing_alt_text(pdf: pikepdf.Pdf, vision_provider) -> int:
@@ -16675,6 +17037,22 @@ def _fix_missing_alt_text(pdf: pikepdf.Pdf, vision_provider) -> int:
     if not figures_no_alt:
         return 0
 
+    # Catalog time budget (P6): cap the figures eligible for the expensive
+    # vision pass to the top-N largest (env-configurable; 0 = unlimited /
+    # current behavior). Ranked by /BBox area where available so the most
+    # meaningful images keep vision-generated alt text; the rest fall through to
+    # the deterministic Strategy-2 fallback below.
+    try:
+        _max_fig_vision = int(os.environ.get("PDF_FIX_MAX_FIGURE_VISION", "0"))
+    except ValueError:
+        _max_fig_vision = 0
+
+    figures_for_vision = figures_no_alt
+    if _max_fig_vision > 0 and len(figures_no_alt) > _max_fig_vision:
+        figures_for_vision = sorted(
+            figures_no_alt, key=_figure_layout_bbox_area, reverse=True
+        )[:_max_fig_vision]
+
     fixed = 0
 
     # Strategy 1: Try page-level rendering with vision model.
@@ -16683,9 +17061,9 @@ def _fix_missing_alt_text(pdf: pikepdf.Pdf, vision_provider) -> int:
             from project_remedy.pdf_vision import render_page_to_image
             import asyncio
 
-            # Group figures by page.
+            # Group figures by page (top-N largest only, per the P6 cap).
             page_figures: dict[int, list[pikepdf.Dictionary]] = {}
-            for node in figures_no_alt:
+            for node in figures_for_vision:
                 page_idx = _find_node_page(node, pdf)
                 page_figures.setdefault(page_idx, []).append(node)
 
